@@ -11,6 +11,7 @@ int main(void)
 
     mon_reset(NULL);
     expect_output_eq(NULL, 1, MONITOR_DEFAULT_WELCOME);
+    expect_output_eq("trace\n", 1, MONITOR_DEFAULT_TRACE_OUTPUT_TEXT);
 
     MON_TRACE_U8(&counter);
 
@@ -26,6 +27,11 @@ int main(void)
     expect_output_eq("list extra\n", 1, "Usage: list\n");
     expect_output_eq("get\n", 1, "Usage: get <name>\n");
     expect_output_eq("set counter\n", 1, "Usage: set <name> <value>\n");
+    expect_output_eq("trace maybe\n", 1, "Usage: trace [on|off]\n");
+    expect_output_eq("trace on now\n", 1, "Usage: trace [on|off]\n");
+    expect_output_eq("trace off\n", 1, MONITOR_TRACE_OUTPUT_OFF_TEXT);
+    expect_output_eq("trace\n", 1, MONITOR_TRACE_OUTPUT_OFF_TEXT);
+    expect_output_eq("trace on\n", 1, MONITOR_TRACE_OUTPUT_ON_TEXT);
     expect_output_eq("set missing 1\n", 1, "Unknown variable: missing\n");
     expect_output_eq("set counter nope\n", 1, "Invalid value for counter: nope\n");
     expect_output_eq("?\n", 1, MONITOR_DEFAULT_WELCOME);

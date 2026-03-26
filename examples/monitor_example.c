@@ -60,7 +60,7 @@ int main(void)
     mon_reset("Welcome to the minimon demo.\n");
 
     (void)puts("minimon example");
-    (void)puts("Monitor shell: help, list, get <name>, set <name> <value>");
+    (void)puts("Monitor shell: help, list, get <name>, set <name> <value>, trace [on|off]");
     (void)puts("Read-only trace example: health_code");
     (void)puts("Example commands: step, print, quit");
     demo_register_traces(&state);

@@ -82,6 +82,7 @@ typedef struct mon_state {
     char input_buffer[MON_MAX_INPUT_LENGTH];
     size_t input_length;
     bool input_overflow;
+    bool trace_output_enabled;
     mon_trace_entry_t traces[MON_MAX_TRACES];
 } mon_state_t;
 
@@ -129,6 +130,24 @@ static const char *mon_current_welcome_message(void)
     }
 
     return g_mon_default_welcome;
+}
+
+static bool mon_default_trace_output_enabled(void)
+{
+#ifdef NDEBUG
+    return false;
+#else
+    return true;
+#endif
+}
+
+static const char *mon_trace_output_state_text(bool enabled)
+{
+    if (enabled) {
+        return "Automatic trace output: on\n";
+    }
+
+    return "Automatic trace output: off\n";
 }
 
 static void mon_copy_snapshot(mon_value_snapshot_t *destination,
@@ -747,7 +766,9 @@ static void mon_check_traces(void)
                 (void)memcpy(&entry->last_value,
                              &current_value,
                              sizeof(entry->last_value));
-                mon_queue_entry_value(entry, "trace ");
+                if (g_mon_state.trace_output_enabled) {
+                    mon_queue_entry_value(entry, "trace ");
+                }
             }
         }
     }
@@ -761,7 +782,8 @@ static void mon_handle_help_command(void)
         "  help\n"
         "  list\n"
         "  get <name>\n"
-        "  set <name> <value>\n");
+        "  set <name> <value>\n"
+        "  trace [on|off]\n");
 }
 
 static void mon_handle_list_command(void)
@@ -817,6 +839,31 @@ static void mon_handle_set_command(const char *name, const char *value)
     mon_queue_entry_value(entry, "");
 }
 
+static void mon_handle_trace_command(const char *argument)
+{
+    if (argument == NULL) {
+        mon_queue_message(
+            mon_trace_output_state_text(g_mon_state.trace_output_enabled));
+        return;
+    }
+
+    if (strcmp(argument, "on") == 0) {
+        g_mon_state.trace_output_enabled = true;
+        mon_queue_message(
+            mon_trace_output_state_text(g_mon_state.trace_output_enabled));
+        return;
+    }
+
+    if (strcmp(argument, "off") == 0) {
+        g_mon_state.trace_output_enabled = false;
+        mon_queue_message(
+            mon_trace_output_state_text(g_mon_state.trace_output_enabled));
+        return;
+    }
+
+    mon_queue_message("Usage: trace [on|off]\n");
+}
+
 static void mon_process_line(char *line)
 {
     char *cursor = line;
@@ -870,6 +917,18 @@ static void mon_process_line(char *line)
         }
 
         mon_handle_set_command(argument1, argument2);
+        return;
+    }
+
+    if (strcmp(command, "trace") == 0) {
+        argument1 = mon_next_token(&cursor);
+
+        if (mon_next_token(&cursor) != NULL) {
+            mon_queue_message("Usage: trace [on|off]\n");
+            return;
+        }
+
+        mon_handle_trace_command(argument1);
         return;
     }
 
@@ -1064,6 +1123,7 @@ static void mon_register_value_trace(const mon_value_snapshot_t *value,
 void mon_reset(const char *welcome_message)
 {
     mon_state_clear();
+    g_mon_state.trace_output_enabled = mon_default_trace_output_enabled();
     mon_copy_text(g_mon_state.welcome_message,
                   sizeof(g_mon_state.welcome_message),
                   (welcome_message != NULL) ? welcome_message

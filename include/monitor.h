@@ -64,6 +64,11 @@ void mon_reset(const char *welcome_message);
  *       for example decimal and 0x-prefixed hexadecimal input.
  *       Floating-point values accept the formats handled by strtod().
  *       Read-only value traces reject write attempts.
+ *   trace [on|off]
+ *       Without an argument, print whether automatic trace-change output is
+ *       currently enabled. With "on" or "off", enable or disable automatic
+ *       output of registered trace changes. The default after mon_reset() is
+ *       enabled when NDEBUG is not defined and disabled otherwise.
  *
  * Input is line-oriented. A command is executed once a '\n' or '\r' terminator
  * is received. Input may be provided incrementally across multiple calls.
