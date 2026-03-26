@@ -58,6 +58,7 @@ void mon_reset(const char *welcome_message);
  *       Integer values accept the prefixes handled by strtoull()/strtoll(),
  *       for example decimal and 0x-prefixed hexadecimal input.
  *       Floating-point values accept the formats handled by strtod().
+ *       Read-only value traces reject write attempts.
  *
  * Input is line-oriented. A command is executed once a '\n' or '\r' terminator
  * is received. Input may be provided incrementally across multiple calls.
@@ -122,6 +123,53 @@ void mon_trace_f32(float *value, const char *human_identifier);
 #define MON_TRACE_NAMED_F64(name, ptr) mon_trace_f64((ptr), (name))
 #define MON_TRACE_F64(ptr) mon_trace_f64((ptr), #ptr)
 void mon_trace_f64(double *value, const char *human_identifier);
+
+/*
+ * Register read-only values for tracing and shell reads.
+ *
+ * The passed value is copied into internal storage. Re-register the same name
+ * whenever the source value changes. Read-only traces can be listed and read
+ * from the shell, but set <name> <value> is rejected for them.
+ */
+#define MON_TRACE_NAMED_VALUE_U8(name, value) mon_trace_u8_value((value), (name))
+#define MON_TRACE_VALUE_U8(value) mon_trace_u8_value((value), #value)
+void mon_trace_u8_value(uint8_t value, const char *human_identifier);
+
+#define MON_TRACE_NAMED_VALUE_I8(name, value) mon_trace_i8_value((value), (name))
+#define MON_TRACE_VALUE_I8(value) mon_trace_i8_value((value), #value)
+void mon_trace_i8_value(int8_t value, const char *human_identifier);
+
+#define MON_TRACE_NAMED_VALUE_U16(name, value) mon_trace_u16_value((value), (name))
+#define MON_TRACE_VALUE_U16(value) mon_trace_u16_value((value), #value)
+void mon_trace_u16_value(uint16_t value, const char *human_identifier);
+
+#define MON_TRACE_NAMED_VALUE_I16(name, value) mon_trace_i16_value((value), (name))
+#define MON_TRACE_VALUE_I16(value) mon_trace_i16_value((value), #value)
+void mon_trace_i16_value(int16_t value, const char *human_identifier);
+
+#define MON_TRACE_NAMED_VALUE_U32(name, value) mon_trace_u32_value((value), (name))
+#define MON_TRACE_VALUE_U32(value) mon_trace_u32_value((value), #value)
+void mon_trace_u32_value(uint32_t value, const char *human_identifier);
+
+#define MON_TRACE_NAMED_VALUE_I32(name, value) mon_trace_i32_value((value), (name))
+#define MON_TRACE_VALUE_I32(value) mon_trace_i32_value((value), #value)
+void mon_trace_i32_value(int32_t value, const char *human_identifier);
+
+#define MON_TRACE_NAMED_VALUE_U64(name, value) mon_trace_u64_value((value), (name))
+#define MON_TRACE_VALUE_U64(value) mon_trace_u64_value((value), #value)
+void mon_trace_u64_value(uint64_t value, const char *human_identifier);
+
+#define MON_TRACE_NAMED_VALUE_I64(name, value) mon_trace_i64_value((value), (name))
+#define MON_TRACE_VALUE_I64(value) mon_trace_i64_value((value), #value)
+void mon_trace_i64_value(int64_t value, const char *human_identifier);
+
+#define MON_TRACE_NAMED_VALUE_F32(name, value) mon_trace_f32_value((value), (name))
+#define MON_TRACE_VALUE_F32(value) mon_trace_f32_value((value), #value)
+void mon_trace_f32_value(float value, const char *human_identifier);
+
+#define MON_TRACE_NAMED_VALUE_F64(name, value) mon_trace_f64_value((value), (name))
+#define MON_TRACE_VALUE_F64(value) mon_trace_f64_value((value), #value)
+void mon_trace_f64_value(double value, const char *human_identifier);
 
 #ifdef __cplusplus
 }

@@ -40,6 +40,12 @@ typedef enum mon_value_type {
     MON_VALUE_F64
 } mon_value_type_t;
 
+typedef enum mon_write_result {
+    MON_WRITE_RESULT_OK = 0,
+    MON_WRITE_RESULT_INVALID,
+    MON_WRITE_RESULT_READ_ONLY
+} mon_write_result_t;
+
 typedef union mon_value_snapshot {
     uint8_t u8;
     int8_t i8;
@@ -55,9 +61,11 @@ typedef union mon_value_snapshot {
 
 typedef struct mon_trace_entry {
     bool in_use;
+    bool writable;
     void *ptr;
     mon_value_type_t type;
     char name[MON_MAX_NAME_LENGTH];
+    mon_value_snapshot_t current_value;
     mon_value_snapshot_t last_value;
 } mon_trace_entry_t;
 
@@ -90,6 +98,12 @@ static size_t mon_bounded_strlen(const char *text, size_t max_len)
 static void mon_state_clear(void)
 {
     (void)memset(&g_mon_state, 0, sizeof(g_mon_state));
+}
+
+static void mon_copy_snapshot(mon_value_snapshot_t *destination,
+                              const mon_value_snapshot_t *source)
+{
+    (void)memcpy(destination, source, sizeof(*destination));
 }
 
 static size_t mon_type_size(mon_value_type_t type)
@@ -151,6 +165,11 @@ static const char *mon_type_name(mon_value_type_t type)
 static void mon_read_value(const mon_trace_entry_t *entry,
                            mon_value_snapshot_t *snapshot)
 {
+    if (!entry->writable) {
+        mon_copy_snapshot(snapshot, &entry->current_value);
+        return;
+    }
+
     switch (entry->type) {
     case MON_VALUE_U8:
         snapshot->u8 = *(const uint8_t *)entry->ptr;
@@ -573,87 +592,93 @@ static bool mon_parse_float64(const char *text, double *value)
     return true;
 }
 
-static bool mon_write_value(mon_trace_entry_t *entry, const char *text)
+static mon_write_result_t mon_write_value(mon_trace_entry_t *entry,
+                                          const char *text)
 {
     uint64_t unsigned_value;
     int64_t signed_value;
     double float_value;
 
     if ((entry == NULL) || (text == NULL)) {
-        return false;
+        return MON_WRITE_RESULT_INVALID;
+    }
+
+    if (!entry->writable) {
+        return MON_WRITE_RESULT_READ_ONLY;
     }
 
     switch (entry->type) {
     case MON_VALUE_U8:
         if (!mon_parse_unsigned(text, UINT8_MAX, &unsigned_value)) {
-            return false;
+            return MON_WRITE_RESULT_INVALID;
         }
         *(uint8_t *)entry->ptr = (uint8_t)unsigned_value;
         break;
     case MON_VALUE_I8:
         if (!mon_parse_signed(text, INT8_MIN, INT8_MAX, &signed_value)) {
-            return false;
+            return MON_WRITE_RESULT_INVALID;
         }
         *(int8_t *)entry->ptr = (int8_t)signed_value;
         break;
     case MON_VALUE_U16:
         if (!mon_parse_unsigned(text, UINT16_MAX, &unsigned_value)) {
-            return false;
+            return MON_WRITE_RESULT_INVALID;
         }
         *(uint16_t *)entry->ptr = (uint16_t)unsigned_value;
         break;
     case MON_VALUE_I16:
         if (!mon_parse_signed(text, INT16_MIN, INT16_MAX, &signed_value)) {
-            return false;
+            return MON_WRITE_RESULT_INVALID;
         }
         *(int16_t *)entry->ptr = (int16_t)signed_value;
         break;
     case MON_VALUE_U32:
         if (!mon_parse_unsigned(text, UINT32_MAX, &unsigned_value)) {
-            return false;
+            return MON_WRITE_RESULT_INVALID;
         }
         *(uint32_t *)entry->ptr = (uint32_t)unsigned_value;
         break;
     case MON_VALUE_I32:
         if (!mon_parse_signed(text, INT32_MIN, INT32_MAX, &signed_value)) {
-            return false;
+            return MON_WRITE_RESULT_INVALID;
         }
         *(int32_t *)entry->ptr = (int32_t)signed_value;
         break;
     case MON_VALUE_U64:
         if (!mon_parse_unsigned(text, UINT64_MAX, &unsigned_value)) {
-            return false;
+            return MON_WRITE_RESULT_INVALID;
         }
         *(uint64_t *)entry->ptr = (uint64_t)unsigned_value;
         break;
     case MON_VALUE_I64:
         if (!mon_parse_signed(text, INT64_MIN, INT64_MAX, &signed_value)) {
-            return false;
+            return MON_WRITE_RESULT_INVALID;
         }
         *(int64_t *)entry->ptr = (int64_t)signed_value;
         break;
     case MON_VALUE_F32:
         if (!mon_parse_float64(text, &float_value)) {
-            return false;
+            return MON_WRITE_RESULT_INVALID;
         }
         if (isfinite(float_value) &&
             ((float_value > FLT_MAX) || (float_value < -FLT_MAX))) {
-            return false;
+            return MON_WRITE_RESULT_INVALID;
         }
         *(float *)entry->ptr = (float)float_value;
         break;
     case MON_VALUE_F64:
         if (!mon_parse_float64(text, &float_value)) {
-            return false;
+            return MON_WRITE_RESULT_INVALID;
         }
         *(double *)entry->ptr = float_value;
         break;
     default:
-        return false;
+        return MON_WRITE_RESULT_INVALID;
     }
 
+    mon_read_value(entry, &entry->current_value);
     mon_read_value(entry, &entry->last_value);
-    return true;
+    return MON_WRITE_RESULT_OK;
 }
 
 static void mon_queue_entry_value(const mon_trace_entry_t *entry,
@@ -739,13 +764,20 @@ static void mon_handle_get_command(const char *name)
 static void mon_handle_set_command(const char *name, const char *value)
 {
     mon_trace_entry_t *entry = mon_find_trace_by_name(name);
+    const mon_write_result_t result =
+        mon_write_value(entry, value);
 
     if (entry == NULL) {
         mon_queue_textf("Unknown variable: %s\n", name);
         return;
     }
 
-    if (!mon_write_value(entry, value)) {
+    if (result == MON_WRITE_RESULT_READ_ONLY) {
+        mon_queue_textf("Variable is read-only: %s\n", name);
+        return;
+    }
+
+    if (result != MON_WRITE_RESULT_OK) {
         mon_queue_textf("Invalid value for %s: %s\n", name, value);
         return;
     }
@@ -866,9 +898,9 @@ static void mon_process_input(const char *input)
     }
 }
 
-static void mon_register_trace(void *ptr,
-                               mon_value_type_t type,
-                               const char *human_identifier)
+static void mon_register_pointer_trace(void *ptr,
+                                       mon_value_type_t type,
+                                       const char *human_identifier)
 {
     char identifier[MON_MAX_NAME_LENGTH];
     mon_trace_entry_t *entry;
@@ -893,8 +925,11 @@ static void mon_register_trace(void *ptr,
             return;
         }
 
+        entry->writable = true;
+        entry->ptr = ptr;
         entry->type = type;
         (void)snprintf(entry->name, sizeof(entry->name), "%s", identifier);
+        mon_read_value(entry, &entry->current_value);
         if (previous_type != type) {
             mon_read_value(entry, &entry->last_value);
         }
@@ -914,6 +949,7 @@ static void mon_register_trace(void *ptr,
             }
 
             g_mon_state.traces[index].in_use = true;
+            g_mon_state.traces[index].writable = true;
             g_mon_state.traces[index].ptr = ptr;
             g_mon_state.traces[index].type = type;
             (void)snprintf(g_mon_state.traces[index].name,
@@ -921,7 +957,70 @@ static void mon_register_trace(void *ptr,
                            "%s",
                            identifier);
             mon_read_value(&g_mon_state.traces[index],
-                           &g_mon_state.traces[index].last_value);
+                           &g_mon_state.traces[index].current_value);
+            mon_copy_snapshot(&g_mon_state.traces[index].last_value,
+                              &g_mon_state.traces[index].current_value);
+            return;
+        }
+    }
+
+    mon_queue_message("[monitor] trace registry full\n");
+}
+
+static void mon_register_value_trace(const mon_value_snapshot_t *value,
+                                     mon_value_type_t type,
+                                     const char *human_identifier)
+{
+    char identifier[MON_MAX_NAME_LENGTH];
+    mon_trace_entry_t *entry = NULL;
+    size_t index;
+
+    if ((human_identifier != NULL) && (human_identifier[0] != '\0')) {
+        mon_copy_identifier(identifier,
+                            sizeof(identifier),
+                            human_identifier,
+                            0u);
+        entry = mon_find_trace_by_name(identifier);
+    }
+
+    if (entry != NULL) {
+        const mon_value_type_t previous_type = entry->type;
+
+        if (entry->writable) {
+            mon_queue_textf("[monitor] duplicate trace name: %s\n", identifier);
+            return;
+        }
+
+        entry->type = type;
+        mon_copy_snapshot(&entry->current_value, value);
+        if (previous_type != type) {
+            mon_copy_snapshot(&entry->last_value, value);
+        }
+        return;
+    }
+
+    for (index = 0u; index < MON_MAX_TRACES; index++) {
+        if (!g_mon_state.traces[index].in_use) {
+            mon_copy_identifier(identifier,
+                                sizeof(identifier),
+                                human_identifier,
+                                index);
+
+            if (mon_name_conflicts(NULL, identifier)) {
+                mon_queue_textf("[monitor] duplicate trace name: %s\n", identifier);
+                return;
+            }
+
+            g_mon_state.traces[index].in_use = true;
+            g_mon_state.traces[index].writable = false;
+            g_mon_state.traces[index].ptr = NULL;
+            g_mon_state.traces[index].type = type;
+            (void)snprintf(g_mon_state.traces[index].name,
+                           sizeof(g_mon_state.traces[index].name),
+                           "%s",
+                           identifier);
+            mon_copy_snapshot(&g_mon_state.traces[index].current_value, value);
+            mon_copy_snapshot(&g_mon_state.traces[index].last_value, value);
             return;
         }
     }
@@ -984,7 +1083,17 @@ const char *mon_print(const char *fmt, ...)
 #define MON_DEFINE_TRACE_FUNCTION(function_name, value_type, enum_type)       \
     void function_name(value_type *value, const char *human_identifier)       \
     {                                                                         \
-        mon_register_trace((void *)value, enum_type, human_identifier);       \
+        mon_register_pointer_trace((void *)value, enum_type,                  \
+                                   human_identifier);                         \
+    }
+
+#define MON_DEFINE_VALUE_TRACE_FUNCTION(function_name, member_name,            \
+                                        value_type, enum_type)                \
+    void function_name(value_type value, const char *human_identifier)        \
+    {                                                                         \
+        mon_value_snapshot_t snapshot;                                        \
+        snapshot.member_name = value;                                         \
+        mon_register_value_trace(&snapshot, enum_type, human_identifier);     \
     }
 
 MON_DEFINE_TRACE_FUNCTION(mon_trace_u8, uint8_t, MON_VALUE_U8)
@@ -997,3 +1106,14 @@ MON_DEFINE_TRACE_FUNCTION(mon_trace_u64, uint64_t, MON_VALUE_U64)
 MON_DEFINE_TRACE_FUNCTION(mon_trace_i64, int64_t, MON_VALUE_I64)
 MON_DEFINE_TRACE_FUNCTION(mon_trace_f32, float, MON_VALUE_F32)
 MON_DEFINE_TRACE_FUNCTION(mon_trace_f64, double, MON_VALUE_F64)
+
+MON_DEFINE_VALUE_TRACE_FUNCTION(mon_trace_u8_value, u8, uint8_t, MON_VALUE_U8)
+MON_DEFINE_VALUE_TRACE_FUNCTION(mon_trace_i8_value, i8, int8_t, MON_VALUE_I8)
+MON_DEFINE_VALUE_TRACE_FUNCTION(mon_trace_u16_value, u16, uint16_t, MON_VALUE_U16)
+MON_DEFINE_VALUE_TRACE_FUNCTION(mon_trace_i16_value, i16, int16_t, MON_VALUE_I16)
+MON_DEFINE_VALUE_TRACE_FUNCTION(mon_trace_u32_value, u32, uint32_t, MON_VALUE_U32)
+MON_DEFINE_VALUE_TRACE_FUNCTION(mon_trace_i32_value, i32, int32_t, MON_VALUE_I32)
+MON_DEFINE_VALUE_TRACE_FUNCTION(mon_trace_u64_value, u64, uint64_t, MON_VALUE_U64)
+MON_DEFINE_VALUE_TRACE_FUNCTION(mon_trace_i64_value, i64, int64_t, MON_VALUE_I64)
+MON_DEFINE_VALUE_TRACE_FUNCTION(mon_trace_f32_value, f32, float, MON_VALUE_F32)
+MON_DEFINE_VALUE_TRACE_FUNCTION(mon_trace_f64_value, f64, double, MON_VALUE_F64)

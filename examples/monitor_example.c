@@ -12,12 +12,19 @@ typedef struct demo_state {
     float gain;
 } demo_state_t;
 
+static uint16_t demo_health_code(const demo_state_t *state)
+{
+    return (uint16_t)(((uint16_t)state->led_level << 8) |
+                      (uint16_t)(state->ticks % 0x100u));
+}
+
 static void demo_register_traces(demo_state_t *state)
 {
     MON_TRACE_NAMED_U8("led_level", &state->led_level);
     MON_TRACE_NAMED_U32("ticks", &state->ticks);
     MON_TRACE_NAMED_I16("temperature_c", &state->temperature_c);
     MON_TRACE_NAMED_F32("gain", &state->gain);
+    MON_TRACE_NAMED_VALUE_U16("health_code", demo_health_code(state));
 }
 
 static void demo_drain_monitor(const char *input)
@@ -54,6 +61,7 @@ int main(void)
 
     (void)puts("minimon example");
     (void)puts("Monitor shell: help, list, get <name>, set <name> <value>");
+    (void)puts("Read-only trace example: health_code");
     (void)puts("Example commands: step, print, quit");
     demo_register_traces(&state);
     demo_drain_monitor("list\n");
