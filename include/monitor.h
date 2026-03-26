@@ -1,21 +1,130 @@
-#pragma once
+#ifndef MONITOR_H
+#define MONITOR_H
 
-// Function to for cyclic calling. Input is 
-// input provided by the user. device_ready is a bool
-// indicating if the peripheral used to output the message
-// is capable of accepting new output. If not the module
-// must buffer.
-//
-// Returns a c string to output via some peripheral
-// Memory valid until next call of minimon_task()
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#ifndef MON_MAX_TRACES
+#define MON_MAX_TRACES 32u
+#endif
+
+#ifndef MON_MAX_NAME_LENGTH
+#define MON_MAX_NAME_LENGTH 32u
+#endif
+
+#ifndef MON_MAX_INPUT_LENGTH
+#define MON_MAX_INPUT_LENGTH 96u
+#endif
+
+#ifndef MON_MAX_MESSAGE_LENGTH
+#define MON_MAX_MESSAGE_LENGTH 128u
+#endif
+
+#ifndef MON_MAX_QUEUED_MESSAGES
+#define MON_MAX_QUEUED_MESSAGES 16u
+#endif
+
+#ifndef MON_MAX_FORMAT_LENGTH
+#define MON_MAX_FORMAT_LENGTH 256u
+#endif
+
+/*
+ * Reset all internal monitor state and queue a welcome message.
+ *
+ * welcome_message may be NULL to request the built-in generic welcome message.
+ * No state is preserved across reset boundaries, including the welcome message.
+ *
+ * Registered pointers must remain valid until they are cleared with mon_reset().
+ * The module is stateful and not re-entrant.
+ */
+void mon_reset(const char *welcome_message);
+
+/*
+ * Process newly received shell input, trace registered values, and return one
+ * buffered output chunk when the transport is ready.
+ *
+ * Shell commands:
+ *   help
+ *       Print the supported shell commands.
+ *   list
+ *       Print every currently registered trace as "<name> (<type>) = <value>".
+ *   get <name>
+ *       Print the current value of a registered trace.
+ *   set <name> <value>
+ *       Parse <value> and write it into a registered trace.
+ *       Integer values accept the prefixes handled by strtoull()/strtoll(),
+ *       for example decimal and 0x-prefixed hexadecimal input.
+ *       Floating-point values accept the formats handled by strtod().
+ *
+ * Input is line-oriented. A command is executed once a '\n' or '\r' terminator
+ * is received. Input may be provided incrementally across multiple calls.
+ *
+ * input may be NULL when no new bytes were received. The returned pointer is
+ * valid until the next call into the monitor module. NULL means no output is
+ * available for transmission on this call.
+ */
 const char *mon_task(const char *input, int device_ready);
 
-// Print something to the user
+/*
+ * Queue formatted application output for later transmission by mon_task().
+ *
+ * The formatted text is copied into the monitor's internal message queue and
+ * may be truncated to MON_MAX_FORMAT_LENGTH - 1 bytes.
+ */
 const char *mon_print(const char *fmt, ...);
 
-// Register a u8 variable for introspection (reading/writing) by the user
-// ptr must be valid util call of mon_task()
-#define MON_TRACE_U8(ptr) mon_trace_u8((ptr), ##ptr)
-void mon_trace_u8(uint8_t *v, const char *human_identifer);
+/*
+ * Register variables for tracing and shell access.
+ *
+ * The supplied pointer must remain valid until mon_reset() clears the monitor
+ * state. Re-registering the same pointer updates its metadata without clearing
+ * the previously observed value.
+ */
+#define MON_TRACE_NAMED_U8(name, ptr) mon_trace_u8((ptr), (name))
+#define MON_TRACE_U8(ptr) mon_trace_u8((ptr), #ptr)
+void mon_trace_u8(uint8_t *value, const char *human_identifier);
 
-// TODO: add signed/unsigned 16, 32, 64 bit and float versions
+#define MON_TRACE_NAMED_I8(name, ptr) mon_trace_i8((ptr), (name))
+#define MON_TRACE_I8(ptr) mon_trace_i8((ptr), #ptr)
+void mon_trace_i8(int8_t *value, const char *human_identifier);
+
+#define MON_TRACE_NAMED_U16(name, ptr) mon_trace_u16((ptr), (name))
+#define MON_TRACE_U16(ptr) mon_trace_u16((ptr), #ptr)
+void mon_trace_u16(uint16_t *value, const char *human_identifier);
+
+#define MON_TRACE_NAMED_I16(name, ptr) mon_trace_i16((ptr), (name))
+#define MON_TRACE_I16(ptr) mon_trace_i16((ptr), #ptr)
+void mon_trace_i16(int16_t *value, const char *human_identifier);
+
+#define MON_TRACE_NAMED_U32(name, ptr) mon_trace_u32((ptr), (name))
+#define MON_TRACE_U32(ptr) mon_trace_u32((ptr), #ptr)
+void mon_trace_u32(uint32_t *value, const char *human_identifier);
+
+#define MON_TRACE_NAMED_I32(name, ptr) mon_trace_i32((ptr), (name))
+#define MON_TRACE_I32(ptr) mon_trace_i32((ptr), #ptr)
+void mon_trace_i32(int32_t *value, const char *human_identifier);
+
+#define MON_TRACE_NAMED_U64(name, ptr) mon_trace_u64((ptr), (name))
+#define MON_TRACE_U64(ptr) mon_trace_u64((ptr), #ptr)
+void mon_trace_u64(uint64_t *value, const char *human_identifier);
+
+#define MON_TRACE_NAMED_I64(name, ptr) mon_trace_i64((ptr), (name))
+#define MON_TRACE_I64(ptr) mon_trace_i64((ptr), #ptr)
+void mon_trace_i64(int64_t *value, const char *human_identifier);
+
+#define MON_TRACE_NAMED_F32(name, ptr) mon_trace_f32((ptr), (name))
+#define MON_TRACE_F32(ptr) mon_trace_f32((ptr), #ptr)
+void mon_trace_f32(float *value, const char *human_identifier);
+
+#define MON_TRACE_NAMED_F64(name, ptr) mon_trace_f64((ptr), (name))
+#define MON_TRACE_F64(ptr) mon_trace_f64((ptr), #ptr)
+void mon_trace_f64(double *value, const char *human_identifier);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif
