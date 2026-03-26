@@ -31,11 +31,17 @@ extern "C" {
 #define MON_MAX_FORMAT_LENGTH 256u
 #endif
 
+#ifndef MON_MAX_WELCOME_LENGTH
+#define MON_MAX_WELCOME_LENGTH 128u
+#endif
+
 /*
- * Reset all internal monitor state and queue a welcome message.
+ * Reset all internal monitor state and configure a welcome message.
  *
  * welcome_message may be NULL to request the built-in generic welcome message.
- * No state is preserved across reset boundaries, including the welcome message.
+ * The message is copied into internal storage, may be truncated to
+ * MON_MAX_WELCOME_LENGTH - 1 bytes, and is emitted only after the first
+ * non-empty user input after reset. That first input is ignored.
  *
  * Registered pointers must remain valid until they are cleared with mon_reset().
  * The module is stateful and not re-entrant.
@@ -61,7 +67,9 @@ void mon_reset(const char *welcome_message);
  *       Read-only value traces reject write attempts.
  *
  * Input is line-oriented. A command is executed once a '\n' or '\r' terminator
- * is received. Input may be provided incrementally across multiple calls.
+ * is received. Input may be provided incrementally across multiple calls. The
+ * first non-empty input after mon_reset() is consumed only to emit the pending
+ * welcome message and is not parsed as a command.
  *
  * input may be NULL when no new bytes were received. The returned pointer is
  * valid until the next call into the monitor module. NULL means no output is

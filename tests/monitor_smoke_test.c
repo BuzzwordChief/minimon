@@ -12,6 +12,13 @@ static const char *expect_output(const char *text, int device_ready)
     return output;
 }
 
+static void expect_no_output(const char *text, int device_ready)
+{
+    const char *output = mon_task(text, device_ready);
+
+    assert(output == NULL);
+}
+
 int main(void)
 {
     uint8_t counter = 1u;
@@ -20,12 +27,14 @@ int main(void)
     const char *output;
 
     mon_reset(NULL);
-    output = expect_output(NULL, 1);
-    assert(strcmp(output, "minimon ready. Type 'help' for commands.\n") == 0);
+    expect_no_output(NULL, 1);
 
     MON_TRACE_U8(&counter);
     MON_TRACE_I16(&temperature);
     MON_TRACE_NAMED_VALUE_U16("status_word", status_word);
+
+    output = expect_output("get counter\n", 1);
+    assert(strcmp(output, "minimon ready. Type 'help' for commands.\n") == 0);
 
     output = expect_output("get counter\n", 1);
     assert(strcmp(output, "counter (u8) = 1\n") == 0);
@@ -72,12 +81,14 @@ int main(void)
     assert(strcmp(output, "status_word (u16) = 4661\n") == 0);
 
     mon_reset("custom welcome\n");
-    output = expect_output(NULL, 1);
-    assert(strcmp(output, "custom welcome\n") == 0);
+    expect_no_output(NULL, 1);
 
     MON_TRACE_U8(&counter);
     MON_TRACE_I16(&temperature);
     MON_TRACE_NAMED_VALUE_U16("status_word", status_word);
+
+    output = expect_output("reset\n", 1);
+    assert(strcmp(output, "custom welcome\n") == 0);
 
     output = expect_output("reset\n", 1);
     assert(strcmp(output, "Unknown command: reset\n") == 0);

@@ -55,6 +55,7 @@ int main(void)
         .temperature_c = 20,
         .gain = 0.25f
     };
+    int monitor_ready = 0;
     char input[MON_MAX_INPUT_LENGTH];
 
     mon_reset("Welcome to the minimon demo.\n");
@@ -62,9 +63,9 @@ int main(void)
     (void)puts("minimon example");
     (void)puts("Monitor shell: help, list, get <name>, set <name> <value>");
     (void)puts("Read-only trace example: health_code");
+    (void)puts("The first entered line is ignored and only shows the welcome banner.");
     (void)puts("Example commands: step, print, quit");
     demo_register_traces(&state);
-    demo_drain_monitor("list\n");
 
     for (;;) {
         (void)fputs("> ", stdout);
@@ -73,6 +74,13 @@ int main(void)
         if (fgets(input, sizeof(input), stdin) == NULL) {
             (void)fputc('\n', stdout);
             break;
+        }
+
+        if (monitor_ready == 0) {
+            demo_register_traces(&state);
+            demo_drain_monitor(input);
+            monitor_ready = 1;
+            continue;
         }
 
         if ((strcmp(input, "quit\n") == 0) || (strcmp(input, "exit\n") == 0)) {

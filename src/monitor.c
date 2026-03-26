@@ -23,6 +23,8 @@ _Static_assert(MON_MAX_QUEUED_MESSAGES > 0u,
                "MON_MAX_QUEUED_MESSAGES must be greater than zero");
 _Static_assert(MON_MAX_FORMAT_LENGTH > 1u,
                "MON_MAX_FORMAT_LENGTH must be greater than one");
+_Static_assert(MON_MAX_WELCOME_LENGTH > 0u,
+               "MON_MAX_WELCOME_LENGTH must be greater than zero");
 
 static const char g_mon_default_welcome[] =
     "minimon ready. Type 'help' for commands.\n";
@@ -45,6 +47,12 @@ typedef enum mon_write_result {
     MON_WRITE_RESULT_INVALID,
     MON_WRITE_RESULT_READ_ONLY
 } mon_write_result_t;
+
+typedef enum mon_welcome_state {
+    MON_WELCOME_IDLE = 0,
+    MON_WELCOME_WAITING_FOR_INPUT,
+    MON_WELCOME_ACTIVE
+} mon_welcome_state_t;
 
 typedef union mon_value_snapshot {
     uint8_t u8;
@@ -76,6 +84,9 @@ typedef struct mon_state {
     size_t count;
     size_t dropped_messages;
     char current_output[MON_MAX_MESSAGE_LENGTH];
+    char welcome_message[MON_MAX_WELCOME_LENGTH];
+    size_t welcome_offset;
+    mon_welcome_state_t welcome_state;
     char input_buffer[MON_MAX_INPUT_LENGTH];
     size_t input_length;
     bool input_overflow;
@@ -98,6 +109,25 @@ static size_t mon_bounded_strlen(const char *text, size_t max_len)
 static void mon_state_clear(void)
 {
     (void)memset(&g_mon_state, 0, sizeof(g_mon_state));
+}
+
+static void mon_copy_text(char *destination,
+                          size_t destination_size,
+                          const char *source)
+{
+    size_t length;
+
+    if ((destination == NULL) || (destination_size == 0u)) {
+        return;
+    }
+
+    if (source == NULL) {
+        source = "";
+    }
+
+    length = mon_bounded_strlen(source, destination_size - 1u);
+    (void)memcpy(destination, source, length);
+    destination[length] = '\0';
 }
 
 static void mon_copy_snapshot(mon_value_snapshot_t *destination,
@@ -489,6 +519,33 @@ static const char *mon_dequeue_message(void)
     g_mon_state.count--;
 
     mon_flush_drop_notice_if_possible();
+
+    return g_mon_state.current_output;
+}
+
+static const char *mon_dequeue_welcome(void)
+{
+    const char *cursor;
+    size_t chunk_length;
+
+    if (g_mon_state.welcome_state != MON_WELCOME_ACTIVE) {
+        return NULL;
+    }
+
+    cursor = &g_mon_state.welcome_message[g_mon_state.welcome_offset];
+    if (*cursor == '\0') {
+        g_mon_state.welcome_state = MON_WELCOME_IDLE;
+        return NULL;
+    }
+
+    chunk_length = mon_bounded_strlen(cursor, MON_MAX_MESSAGE_LENGTH - 1u);
+    (void)memcpy(g_mon_state.current_output, cursor, chunk_length);
+    g_mon_state.current_output[chunk_length] = '\0';
+
+    g_mon_state.welcome_offset += chunk_length;
+    if (g_mon_state.welcome_message[g_mon_state.welcome_offset] == '\0') {
+        g_mon_state.welcome_state = MON_WELCOME_IDLE;
+    }
 
     return g_mon_state.current_output;
 }
@@ -1031,22 +1088,39 @@ static void mon_register_value_trace(const mon_value_snapshot_t *value,
 void mon_reset(const char *welcome_message)
 {
     mon_state_clear();
-    mon_queue_text((welcome_message != NULL) ? welcome_message
-                                             : g_mon_default_welcome);
+    mon_copy_text(g_mon_state.welcome_message,
+                  sizeof(g_mon_state.welcome_message),
+                  (welcome_message != NULL) ? welcome_message
+                                            : g_mon_default_welcome);
+    g_mon_state.welcome_offset = 0u;
+    g_mon_state.welcome_state = MON_WELCOME_WAITING_FOR_INPUT;
 }
 
 const char *mon_task(const char *input, int device_ready)
 {
+    const char *output;
+
     g_mon_state.current_output[0] = '\0';
 
     mon_check_traces();
 
     if (input != NULL) {
-        mon_process_input(input);
+        if ((g_mon_state.welcome_state == MON_WELCOME_WAITING_FOR_INPUT) &&
+            (input[0] != '\0')) {
+            g_mon_state.welcome_state = MON_WELCOME_ACTIVE;
+            g_mon_state.welcome_offset = 0u;
+        } else {
+            mon_process_input(input);
+        }
     }
 
     if (device_ready == 0) {
         return NULL;
+    }
+
+    output = mon_dequeue_welcome();
+    if (output != NULL) {
+        return output;
     }
 
     return mon_dequeue_message();
