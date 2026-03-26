@@ -40,8 +40,7 @@ extern "C" {
  *
  * welcome_message may be NULL to request the built-in generic welcome message.
  * The message is copied into internal storage, may be truncated to
- * MON_MAX_WELCOME_LENGTH - 1 bytes, and is emitted only after the first
- * non-empty user input after reset. That first input is ignored.
+ * MON_MAX_WELCOME_LENGTH - 1 bytes, and is queued immediately by mon_reset().
  *
  * Registered pointers must remain valid until they are cleared with mon_reset().
  * The module is stateful and not re-entrant.
@@ -54,7 +53,7 @@ void mon_reset(const char *welcome_message);
  *
  * Shell commands:
  *   help
- *       Print the supported shell commands.
+ *       Print the welcome message followed by the supported shell commands.
  *   list
  *       Print every currently registered trace as "<name> (<type>) = <value>".
  *   get <name>
@@ -67,9 +66,7 @@ void mon_reset(const char *welcome_message);
  *       Read-only value traces reject write attempts.
  *
  * Input is line-oriented. A command is executed once a '\n' or '\r' terminator
- * is received. Input may be provided incrementally across multiple calls. The
- * first non-empty input after mon_reset() is consumed only to emit the pending
- * welcome message and is not parsed as a command.
+ * is received. Input may be provided incrementally across multiple calls.
  *
  * input may be NULL when no new bytes were received. The returned pointer is
  * valid until the next call into the monitor module. NULL means no output is
