@@ -35,6 +35,10 @@ extern "C" {
 #define MON_MAX_WELCOME_LENGTH 128u
 #endif
 
+#ifndef MONITOR_ENABLE_FLOAT_SUPPORT
+#define MONITOR_ENABLE_FLOAT_SUPPORT 0
+#endif
+
 /*
  * Reset all internal monitor state and configure a welcome message.
  *
@@ -62,7 +66,8 @@ void mon_reset(const char *welcome_message);
  *       Parse <value> and write it into a registered trace.
  *       Integer values accept the prefixes handled by strtoull()/strtoll(),
  *       for example decimal and 0x-prefixed hexadecimal input.
- *       Floating-point values accept the formats handled by strtod().
+ *       When MONITOR_ENABLE_FLOAT_SUPPORT is non-zero, floating-point values
+ *       accept the formats handled by strtod().
  *       Read-only value traces reject write attempts.
  *   trace [on|off]
  *       Without an argument, print whether automatic trace-change output is
@@ -139,7 +144,9 @@ void mon_trace_f64(double *value, const char *human_identifier);
  *
  * The passed value is copied into internal storage. Re-register the same name
  * whenever the source value changes. Read-only traces can be listed and read
- * from the shell, but set <name> <value> is rejected for them.
+ * from the shell, but set <name> <value> is rejected for them. When
+ * MONITOR_ENABLE_FLOAT_SUPPORT is zero, the float trace APIs queue
+ * "[monitor] float support disabled" and do not register a trace.
  */
 #define MON_TRACE_NAMED_VALUE_U8(name, value) mon_trace_u8_value((value), (name))
 #define MON_TRACE_VALUE_U8(value) mon_trace_u8_value((value), #value)

@@ -2,15 +2,18 @@
 
 #include <ctype.h>
 #include <errno.h>
-#include <float.h>
 #include <inttypes.h>
-#include <math.h>
 #include <stdbool.h>
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#if MONITOR_ENABLE_FLOAT_SUPPORT
+#include <float.h>
+#include <math.h>
+#endif
 
 _Static_assert(MON_MAX_TRACES > 0u, "MON_MAX_TRACES must be greater than zero");
 _Static_assert(MON_MAX_NAME_LENGTH > 1u,
@@ -34,6 +37,10 @@ _Static_assert(MON_MAX_INPUT_LENGTH <= UINT16_MAX,
 
 static const char g_mon_default_welcome[] =
     "minimon ready. Type 'help' for commands.\n";
+#if !MONITOR_ENABLE_FLOAT_SUPPORT
+static const char g_mon_float_support_disabled[] =
+    "[monitor] float support disabled\n";
+#endif
 
 typedef enum mon_value_type {
     MON_VALUE_U8 = 0,
@@ -44,8 +51,10 @@ typedef enum mon_value_type {
     MON_VALUE_I32,
     MON_VALUE_U64,
     MON_VALUE_I64,
+#if MONITOR_ENABLE_FLOAT_SUPPORT
     MON_VALUE_F32,
     MON_VALUE_F64
+#endif
 } mon_value_type_t;
 
 typedef enum mon_write_result {
@@ -162,6 +171,17 @@ static const char *mon_trace_output_state_text(bool enabled)
     return "Automatic trace output: off\n";
 }
 
+#if !MONITOR_ENABLE_FLOAT_SUPPORT
+static void mon_finish_output_delivery(void);
+static void mon_queue_message(const char *text);
+
+static void mon_queue_float_support_disabled(void)
+{
+    mon_finish_output_delivery();
+    mon_queue_message(g_mon_float_support_disabled);
+}
+#endif
+
 static void mon_copy_snapshot(mon_value_snapshot_t *destination,
                               const mon_value_snapshot_t *source)
 {
@@ -192,10 +212,12 @@ static size_t mon_type_size(mon_value_type_t type)
         return sizeof(uint64_t);
     case MON_VALUE_I64:
         return sizeof(int64_t);
+#if MONITOR_ENABLE_FLOAT_SUPPORT
     case MON_VALUE_F32:
         return sizeof(float);
     case MON_VALUE_F64:
         return sizeof(double);
+#endif
     default:
         return 0u;
     }
@@ -220,10 +242,12 @@ static const char *mon_type_name(mon_value_type_t type)
         return "u64";
     case MON_VALUE_I64:
         return "i64";
+#if MONITOR_ENABLE_FLOAT_SUPPORT
     case MON_VALUE_F32:
         return "f32";
     case MON_VALUE_F64:
         return "f64";
+#endif
     default:
         return "unknown";
     }
@@ -262,12 +286,14 @@ static void mon_read_value(const mon_trace_entry_t *entry,
     case MON_VALUE_I64:
         snapshot->i64 = *(const int64_t *)entry->source.ptr;
         break;
+#if MONITOR_ENABLE_FLOAT_SUPPORT
     case MON_VALUE_F32:
         snapshot->f32 = *(const float *)entry->source.ptr;
         break;
     case MON_VALUE_F64:
         snapshot->f64 = *(const double *)entry->source.ptr;
         break;
+#endif
     default:
         break;
     }
@@ -304,10 +330,12 @@ static int mon_format_snapshot(mon_value_type_t type,
         return snprintf(buffer, buffer_size, "%" PRIu64, value->u64);
     case MON_VALUE_I64:
         return snprintf(buffer, buffer_size, "%" PRId64, value->i64);
+#if MONITOR_ENABLE_FLOAT_SUPPORT
     case MON_VALUE_F32:
         return snprintf(buffer, buffer_size, "%.9g", (double)value->f32);
     case MON_VALUE_F64:
         return snprintf(buffer, buffer_size, "%.17g", value->f64);
+#endif
     default:
         return snprintf(buffer, buffer_size, "?");
     }
@@ -644,6 +672,7 @@ static bool mon_parse_signed(const char *text,
     return true;
 }
 
+#if MONITOR_ENABLE_FLOAT_SUPPORT
 static bool mon_parse_float64(const char *text, double *value)
 {
     char *end = NULL;
@@ -663,13 +692,16 @@ static bool mon_parse_float64(const char *text, double *value)
     *value = parsed_value;
     return true;
 }
+#endif
 
 static mon_write_result_t mon_write_value(mon_trace_entry_t *entry,
                                           const char *text)
 {
     uint64_t unsigned_value;
     int64_t signed_value;
+#if MONITOR_ENABLE_FLOAT_SUPPORT
     double float_value;
+#endif
     mon_value_type_t type;
 
     if ((entry == NULL) || (text == NULL)) {
@@ -731,6 +763,7 @@ static mon_write_result_t mon_write_value(mon_trace_entry_t *entry,
         }
         *(int64_t *)entry->source.ptr = (int64_t)signed_value;
         break;
+#if MONITOR_ENABLE_FLOAT_SUPPORT
     case MON_VALUE_F32:
         if (!mon_parse_float64(text, &float_value)) {
             return MON_WRITE_RESULT_INVALID;
@@ -747,6 +780,7 @@ static mon_write_result_t mon_write_value(mon_trace_entry_t *entry,
         }
         *(double *)entry->source.ptr = float_value;
         break;
+#endif
     default:
         return MON_WRITE_RESULT_INVALID;
     }
@@ -1245,8 +1279,24 @@ MON_DEFINE_TRACE_FUNCTION(mon_trace_u32, uint32_t, MON_VALUE_U32)
 MON_DEFINE_TRACE_FUNCTION(mon_trace_i32, int32_t, MON_VALUE_I32)
 MON_DEFINE_TRACE_FUNCTION(mon_trace_u64, uint64_t, MON_VALUE_U64)
 MON_DEFINE_TRACE_FUNCTION(mon_trace_i64, int64_t, MON_VALUE_I64)
+#if MONITOR_ENABLE_FLOAT_SUPPORT
 MON_DEFINE_TRACE_FUNCTION(mon_trace_f32, float, MON_VALUE_F32)
 MON_DEFINE_TRACE_FUNCTION(mon_trace_f64, double, MON_VALUE_F64)
+#else
+void mon_trace_f32(float *value, const char *human_identifier)
+{
+    (void)value;
+    (void)human_identifier;
+    mon_queue_float_support_disabled();
+}
+
+void mon_trace_f64(double *value, const char *human_identifier)
+{
+    (void)value;
+    (void)human_identifier;
+    mon_queue_float_support_disabled();
+}
+#endif
 
 MON_DEFINE_VALUE_TRACE_FUNCTION(mon_trace_u8_value, u8, uint8_t, MON_VALUE_U8)
 MON_DEFINE_VALUE_TRACE_FUNCTION(mon_trace_i8_value, i8, int8_t, MON_VALUE_I8)
@@ -1256,5 +1306,21 @@ MON_DEFINE_VALUE_TRACE_FUNCTION(mon_trace_u32_value, u32, uint32_t, MON_VALUE_U3
 MON_DEFINE_VALUE_TRACE_FUNCTION(mon_trace_i32_value, i32, int32_t, MON_VALUE_I32)
 MON_DEFINE_VALUE_TRACE_FUNCTION(mon_trace_u64_value, u64, uint64_t, MON_VALUE_U64)
 MON_DEFINE_VALUE_TRACE_FUNCTION(mon_trace_i64_value, i64, int64_t, MON_VALUE_I64)
+#if MONITOR_ENABLE_FLOAT_SUPPORT
 MON_DEFINE_VALUE_TRACE_FUNCTION(mon_trace_f32_value, f32, float, MON_VALUE_F32)
 MON_DEFINE_VALUE_TRACE_FUNCTION(mon_trace_f64_value, f64, double, MON_VALUE_F64)
+#else
+void mon_trace_f32_value(float value, const char *human_identifier)
+{
+    (void)value;
+    (void)human_identifier;
+    mon_queue_float_support_disabled();
+}
+
+void mon_trace_f64_value(double value, const char *human_identifier)
+{
+    (void)value;
+    (void)human_identifier;
+    mon_queue_float_support_disabled();
+}
+#endif

@@ -4,6 +4,7 @@ project(minimon LANGUAGES C)
 
 option(MONITOR_BUILD_EXAMPLE "Build interactive monitor example" ON)
 option(MONITOR_BUILD_TESTS "Build monitor tests" OFF)
+option(MONITOR_ENABLE_FLOAT_SUPPORT "Enable float trace and shell support" OFF)
 
 add_library(minimon STATIC
     src/monitor.c
@@ -15,6 +16,10 @@ target_include_directories(minimon
 )
 
 target_compile_features(minimon PUBLIC c_std_11)
+target_compile_definitions(minimon
+    PUBLIC
+        MONITOR_ENABLE_FLOAT_SUPPORT=$<BOOL:${MONITOR_ENABLE_FLOAT_SUPPORT}>
+)
 
 if(MSVC)
     target_compile_options(minimon PRIVATE /W4 /WX)
