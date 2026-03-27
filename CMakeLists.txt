@@ -5,6 +5,9 @@ project(minimon LANGUAGES C)
 option(MONITOR_BUILD_EXAMPLE "Build interactive monitor example" ON)
 option(MONITOR_BUILD_TESTS "Build monitor tests" OFF)
 option(MONITOR_ENABLE_FLOAT_SUPPORT "Enable float trace and shell support" OFF)
+option(MONITOR_ENABLE_SIZE_OPTIMIZATIONS
+       "Enable section-based dead-stripping for release builds"
+       ON)
 
 add_library(minimon STATIC
     src/monitor.c
@@ -20,6 +23,42 @@ target_compile_definitions(minimon
     PUBLIC
         MONITOR_ENABLE_FLOAT_SUPPORT=$<BOOL:${MONITOR_ENABLE_FLOAT_SUPPORT}>
 )
+
+if(MONITOR_ENABLE_SIZE_OPTIMIZATIONS)
+    if(MSVC)
+        target_compile_options(minimon PRIVATE
+            $<$<CONFIG:Release>:/Gw>
+            $<$<CONFIG:Release>:/Gy>
+            $<$<CONFIG:MinSizeRel>:/Gw>
+            $<$<CONFIG:MinSizeRel>:/Gy>
+        )
+        target_link_options(minimon INTERFACE
+            $<$<CONFIG:Release>:/OPT:REF>
+            $<$<CONFIG:Release>:/OPT:ICF>
+            $<$<CONFIG:MinSizeRel>:/OPT:REF>
+            $<$<CONFIG:MinSizeRel>:/OPT:ICF>
+        )
+    else()
+        target_compile_options(minimon PRIVATE
+            $<$<CONFIG:Release>:-ffunction-sections>
+            $<$<CONFIG:Release>:-fdata-sections>
+            $<$<CONFIG:MinSizeRel>:-ffunction-sections>
+            $<$<CONFIG:MinSizeRel>:-fdata-sections>
+        )
+
+        if(APPLE)
+            target_link_options(minimon INTERFACE
+                $<$<CONFIG:Release>:-Wl,-dead_strip>
+                $<$<CONFIG:MinSizeRel>:-Wl,-dead_strip>
+            )
+        else()
+            target_link_options(minimon INTERFACE
+                $<$<CONFIG:Release>:-Wl,--gc-sections>
+                $<$<CONFIG:MinSizeRel>:-Wl,--gc-sections>
+            )
+        endif()
+    endif()
+endif()
 
 if(MSVC)
     target_compile_options(minimon PRIVATE /W4 /WX)

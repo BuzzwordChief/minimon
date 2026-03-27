@@ -16,23 +16,23 @@ extern "C" {
 #endif
 
 #ifndef MON_MAX_INPUT_LENGTH
-#define MON_MAX_INPUT_LENGTH 96u
+#define MON_MAX_INPUT_LENGTH 64u
 #endif
 
 #ifndef MON_MAX_MESSAGE_LENGTH
-#define MON_MAX_MESSAGE_LENGTH 128u
+#define MON_MAX_MESSAGE_LENGTH 96u
 #endif
 
 #ifndef MON_MAX_QUEUED_MESSAGES
-#define MON_MAX_QUEUED_MESSAGES 16u
+#define MON_MAX_QUEUED_MESSAGES 8u
 #endif
 
 #ifndef MON_MAX_FORMAT_LENGTH
-#define MON_MAX_FORMAT_LENGTH 256u
+#define MON_MAX_FORMAT_LENGTH MON_MAX_MESSAGE_LENGTH
 #endif
 
 #ifndef MON_MAX_WELCOME_LENGTH
-#define MON_MAX_WELCOME_LENGTH 128u
+#define MON_MAX_WELCOME_LENGTH MON_MAX_MESSAGE_LENGTH
 #endif
 
 #ifndef MONITOR_ENABLE_FLOAT_SUPPORT
@@ -43,8 +43,10 @@ extern "C" {
  * Reset all internal monitor state and configure a welcome message.
  *
  * welcome_message may be NULL to request the built-in generic welcome message.
- * The message is copied into internal storage, may be truncated to
- * MON_MAX_WELCOME_LENGTH - 1 bytes, and is queued immediately by mon_reset().
+ * The pointer is retained for later help output, so the referenced storage must
+ * remain valid until the next mon_reset(). The message is queued immediately by
+ * mon_reset() and is chunked to the transport at MON_MAX_MESSAGE_LENGTH - 1
+ * bytes per returned output string.
  *
  * Registered pointers must remain valid until they are cleared with mon_reset().
  * The module is stateful and not re-entrant.
@@ -96,8 +98,11 @@ const char *mon_print(const char *fmt, ...);
  * Register variables for tracing and shell access.
  *
  * The supplied pointer must remain valid until mon_reset() clears the monitor
- * state. Re-registering the same pointer updates its metadata without clearing
- * the previously observed value.
+ * state. human_identifier is normalized and retained by pointer rather than
+ * copied, so its storage must also remain valid until mon_reset(). Identifiers
+ * longer than MON_MAX_NAME_LENGTH - 1 bytes are truncated for registration and
+ * shell lookup. Re-registering the same pointer updates its metadata without
+ * clearing the previously observed value.
  */
 #define MON_TRACE_NAMED_U8(name, ptr) mon_trace_u8((ptr), (name))
 #define MON_TRACE_U8(ptr) mon_trace_u8((ptr), #ptr)
@@ -142,9 +147,10 @@ void mon_trace_f64(double *value, const char *human_identifier);
 /*
  * Register read-only values for tracing and shell reads.
  *
- * The passed value is copied into internal storage. Re-register the same name
- * whenever the source value changes. Read-only traces can be listed and read
- * from the shell, but set <name> <value> is rejected for them. When
+ * Re-register the same name whenever the source value changes. The
+ * human_identifier storage must remain valid until mon_reset(). Read-only
+ * traces can be listed and read from the shell, but set <name> <value> is
+ * rejected for them. When
  * MONITOR_ENABLE_FLOAT_SUPPORT is zero, the float trace APIs queue
  * "[monitor] float support disabled" and do not register a trace.
  */
