@@ -404,6 +404,42 @@ static bool mon_queue_message_direct_n(const char *text, size_t length)
     return true;
 }
 
+static void mon_append_n_to_buffer(char *buffer,
+                                   size_t buffer_size,
+                                   size_t *length,
+                                   const char *text,
+                                   size_t text_length)
+{
+    size_t available;
+
+    if ((buffer == NULL) || (length == NULL) || (text == NULL) ||
+        (buffer_size <= 1u) || (*length >= (buffer_size - 1u))) {
+        return;
+    }
+
+    available = (buffer_size - 1u) - *length;
+    if (text_length > available) {
+        text_length = available;
+    }
+
+    (void)memcpy(&buffer[*length], text, text_length);
+    *length += text_length;
+}
+
+static void mon_append_char_to_buffer(char *buffer,
+                                      size_t buffer_size,
+                                      size_t *length,
+                                      char value)
+{
+    if ((buffer == NULL) || (length == NULL) || (buffer_size <= 1u) ||
+        (*length >= (buffer_size - 1u))) {
+        return;
+    }
+
+    buffer[*length] = value;
+    (*length)++;
+}
+
 static void mon_append_u64_to_buffer(char *buffer,
                                      size_t buffer_size,
                                      size_t *length,
@@ -411,6 +447,12 @@ static void mon_append_u64_to_buffer(char *buffer,
 {
     char digits[20];
     size_t count = 0u;
+    size_t available;
+
+    if ((buffer == NULL) || (length == NULL) || (buffer_size <= 1u) ||
+        (*length >= (buffer_size - 1u))) {
+        return;
+    }
 
     do {
         digits[count] = (char)('0' + (value % 10u));
@@ -418,10 +460,12 @@ static void mon_append_u64_to_buffer(char *buffer,
         count++;
     } while ((value != 0u) && (count < sizeof(digits)));
 
-    while ((count > 0u) && ((*length + 1u) < buffer_size)) {
+    available = (buffer_size - 1u) - *length;
+    while ((count > 0u) && (available > 0u)) {
         count--;
         buffer[*length] = digits[count];
         (*length)++;
+        available--;
     }
 }
 
@@ -441,32 +485,26 @@ static void mon_flush_drop_notice_if_possible(void)
 
     if (length < sizeof(notice)) {
         static const char prefix[] = "[monitor] dropped ";
-        const size_t prefix_length = sizeof(prefix) - 1u;
-        const size_t copy_length =
-            (prefix_length < (sizeof(notice) - 1u)) ? prefix_length
-                                                    : (sizeof(notice) - 1u);
 
-        (void)memcpy(notice, prefix, copy_length);
-        length = copy_length;
+        mon_append_n_to_buffer(notice,
+                               sizeof(notice),
+                               &length,
+                               prefix,
+                               sizeof(prefix) - 1u);
     }
 
     mon_append_u64_to_buffer(notice, sizeof(notice), &length, dropped);
 
-    if ((length + 1u) < sizeof(notice)) {
-        notice[length] = ' ';
-        length++;
-    }
+    mon_append_char_to_buffer(notice, sizeof(notice), &length, ' ');
 
     if (length < sizeof(notice)) {
         static const char suffix[] = "message(s)\n";
-        const size_t suffix_length = sizeof(suffix) - 1u;
-        size_t offset = 0u;
 
-        while ((offset < suffix_length) && ((length + 1u) < sizeof(notice))) {
-            notice[length] = suffix[offset];
-            length++;
-            offset++;
-        }
+        mon_append_n_to_buffer(notice,
+                               sizeof(notice),
+                               &length,
+                               suffix,
+                               sizeof(suffix) - 1u);
     }
 
     if (!mon_queue_message_direct_n(notice, length)) {
