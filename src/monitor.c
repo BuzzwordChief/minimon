@@ -1,17 +1,16 @@
 #include "monitor.h"
 
-#include <ctype.h>
-#include <stdbool.h>
 #include <stdarg.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 #if MONITOR_ENABLE_FLOAT_SUPPORT
 #include <errno.h>
 #include <float.h>
 #include <math.h>
+#include <stdlib.h>
 #endif
 
 _Static_assert(MON_MAX_TRACES > 0u, "MON_MAX_TRACES must be greater than zero");
@@ -27,6 +26,8 @@ _Static_assert(MON_MAX_INPUT_LENGTH <= UINT8_MAX,
                "MON_MAX_INPUT_LENGTH must fit in uint8_t");
 _Static_assert(MON_MAX_MESSAGE_LENGTH > 1u,
                "MON_MAX_MESSAGE_LENGTH must be greater than one");
+_Static_assert(MON_MAX_MESSAGE_LENGTH <= UINT8_MAX,
+               "MON_MAX_MESSAGE_LENGTH must fit in uint8_t");
 _Static_assert(MON_MAX_QUEUED_MESSAGES > 0u,
                "MON_MAX_QUEUED_MESSAGES must be greater than zero");
 _Static_assert(MON_MAX_QUEUED_MESSAGES <= UINT8_MAX,
@@ -43,42 +44,6 @@ static const char g_mon_help_text[] =
     "  get <name>\n"
     "  set <name> <value>\n"
     "  trace [on|off]\n";
-static const char g_mon_format_failure_text[] =
-    "[monitor] formatting failure\n";
-static const char g_mon_format_truncated_text[] =
-    "[monitor] formatted output truncated\n";
-static const char g_mon_input_too_long_text[] =
-    "[monitor] input line too long\n";
-static const char g_mon_duplicate_name_prefix[] =
-    "[monitor] duplicate trace name: ";
-static const char g_mon_trace_registry_full_text[] =
-    "[monitor] trace registry full\n";
-static const char g_mon_null_pointer_text[] =
-    "[monitor] null trace pointer ignored\n";
-static const char g_mon_empty_name_text[] =
-    "[monitor] empty trace name ignored\n";
-static const char g_mon_unknown_variable_prefix[] =
-    "Unknown variable: ";
-static const char g_mon_read_only_prefix[] =
-    "Variable is read-only: ";
-static const char g_mon_invalid_value_prefix[] =
-    "Invalid value for ";
-static const char g_mon_invalid_value_separator[] =
-    ": ";
-static const char g_mon_unknown_command_prefix[] =
-    "Unknown command: ";
-static const char g_mon_no_traces_text[] =
-    "No traces registered.\n";
-static const char g_mon_usage_help_text[] =
-    "Usage: help\n";
-static const char g_mon_usage_list_text[] =
-    "Usage: list\n";
-static const char g_mon_usage_get_text[] =
-    "Usage: get <name>\n";
-static const char g_mon_usage_set_text[] =
-    "Usage: set <name> <value>\n";
-static const char g_mon_usage_trace_text[] =
-    "Usage: trace [on|off]\n";
 static const char g_mon_trace_output_on_text[] =
     "Automatic trace output: on\n";
 static const char g_mon_trace_output_off_text[] =
@@ -99,28 +64,42 @@ typedef enum mon_value_type {
     MON_VALUE_I64,
 #if MONITOR_ENABLE_FLOAT_SUPPORT
     MON_VALUE_F32,
-    MON_VALUE_F64
+    MON_VALUE_F64,
 #endif
+    MON_VALUE_TYPE_COUNT
 } mon_value_type_t;
+
+enum {
+    MON_TYPE_FLAG_SIGNED = 0x01u,
+    MON_TYPE_FLAG_FLOAT = 0x02u
+};
+
+typedef struct mon_type_info {
+    uint8_t size;
+    uint8_t flags;
+    char name[4];
+} mon_type_info_t;
+
+static const mon_type_info_t g_mon_type_info[MON_VALUE_TYPE_COUNT] = {
+    { 1u, 0u,                    "u8"  },
+    { 1u, MON_TYPE_FLAG_SIGNED,  "i8"  },
+    { 2u, 0u,                    "u16" },
+    { 2u, MON_TYPE_FLAG_SIGNED,  "i16" },
+    { 4u, 0u,                    "u32" },
+    { 4u, MON_TYPE_FLAG_SIGNED,  "i32" },
+    { 8u, 0u,                    "u64" },
+    { 8u, MON_TYPE_FLAG_SIGNED,  "i64" },
+#if MONITOR_ENABLE_FLOAT_SUPPORT
+    { 4u, MON_TYPE_FLAG_FLOAT,   "f32" },
+    { 8u, MON_TYPE_FLAG_FLOAT,   "f64" },
+#endif
+};
 
 typedef enum mon_write_result {
     MON_WRITE_RESULT_OK = 0,
     MON_WRITE_RESULT_INVALID,
     MON_WRITE_RESULT_READ_ONLY
 } mon_write_result_t;
-
-typedef union mon_value_snapshot {
-    uint8_t u8;
-    int8_t i8;
-    uint16_t u16;
-    int16_t i16;
-    uint32_t u32;
-    int32_t i32;
-    uint64_t u64;
-    int64_t i64;
-    float f32;
-    double f64;
-} mon_value_snapshot_t;
 
 typedef struct mon_name_view {
     const char *ptr;
@@ -130,11 +109,22 @@ typedef struct mon_name_view {
 typedef struct mon_trace_entry {
     void *source_ptr;
     const char *name_ptr;
-    mon_value_snapshot_t last_value;
+    uint8_t last_value[8];
     uint8_t name_length;
     uint8_t type;
     uint8_t flags;
 } mon_trace_entry_t;
+
+enum {
+    MON_TRACE_FLAG_WRITABLE = 0x01u
+};
+
+enum {
+    MON_STATE_FLAG_INPUT_OVERFLOW = 0x01u,
+    MON_STATE_FLAG_TRACE_OUTPUT = 0x02u,
+    MON_STATE_FLAG_OUTPUT_ACTIVE = 0x04u,
+    MON_STATE_FLAG_HAS_WRITABLES = 0x08u
+};
 
 typedef struct mon_state {
     char messages[MON_MAX_QUEUED_MESSAGES][MON_MAX_MESSAGE_LENGTH];
@@ -144,37 +134,18 @@ typedef struct mon_state {
     uint8_t head;
     uint8_t tail;
     uint8_t count;
+    uint8_t staging_length;
     uint8_t input_length;
     uint8_t trace_count;
-    uint8_t writable_trace_count;
     uint8_t flags;
     mon_trace_entry_t traces[MON_MAX_TRACES];
 } mon_state_t;
 
-typedef struct mon_builder {
-    char data[MON_MAX_MESSAGE_LENGTH];
-    size_t length;
-} mon_builder_t;
-
-#if MONITOR_ENABLE_FLOAT_SUPPORT
-static size_t mon_bounded_strlen(const char *text, size_t max_len);
-#endif
-
-enum {
-    MON_TRACE_FLAG_WRITABLE = 0x01u
-};
-
-enum {
-    MON_STATE_FLAG_INPUT_OVERFLOW = 0x01u,
-    MON_STATE_FLAG_TRACE_OUTPUT = 0x02u,
-    MON_STATE_FLAG_OUTPUT_ACTIVE = 0x04u
-};
-
 static mon_state_t g_mon_state;
 
-static void mon_state_clear(void)
+static bool mon_is_whitespace(char c)
 {
-    (void)memset(&g_mon_state, 0, sizeof(g_mon_state));
+    return (c == ' ') || (c == '\t') || (c == '\n') || (c == '\r');
 }
 
 static bool mon_state_flag_is_set(uint8_t flag)
@@ -191,43 +162,184 @@ static void mon_state_set_flag(uint8_t flag, bool enabled)
     }
 }
 
-static const char *mon_current_welcome_message(void)
+static uint8_t mon_next_queue_index(uint8_t index)
 {
-    if (g_mon_state.welcome_message != NULL) {
-        return g_mon_state.welcome_message;
+    index++;
+    if (index >= MON_MAX_QUEUED_MESSAGES) {
+        index = 0u;
+    }
+    return index;
+}
+
+static void mon_maybe_inject_drop_notice(void);
+
+static void mon_stage_ensure_begin(void)
+{
+    if (g_mon_state.staging_length == 0u) {
+        mon_maybe_inject_drop_notice();
+    }
+}
+
+static void mon_stage_append_n(const char *text, size_t length)
+{
+    while (length > 0u) {
+        size_t available;
+        size_t chunk;
+        char *slot;
+
+        mon_stage_ensure_begin();
+
+        if (g_mon_state.count >= MON_MAX_QUEUED_MESSAGES) {
+            g_mon_state.dropped_messages++;
+            return;
+        }
+
+        slot = g_mon_state.messages[g_mon_state.tail];
+        available = (MON_MAX_MESSAGE_LENGTH - 1u) - g_mon_state.staging_length;
+        chunk = (length < available) ? length : available;
+
+        (void)memcpy(&slot[g_mon_state.staging_length], text, chunk);
+        g_mon_state.staging_length =
+            (uint8_t)(g_mon_state.staging_length + chunk);
+        text += chunk;
+        length -= chunk;
+
+        if (length > 0u) {
+            slot[g_mon_state.staging_length] = '\0';
+            g_mon_state.tail = mon_next_queue_index(g_mon_state.tail);
+            g_mon_state.count++;
+            g_mon_state.staging_length = 0u;
+        }
+    }
+}
+
+static void mon_stage_append_text(const char *text)
+{
+    if (text == NULL) {
+        return;
+    }
+    mon_stage_append_n(text, strlen(text));
+}
+
+static void mon_stage_append_char(char c)
+{
+    mon_stage_append_n(&c, 1u);
+}
+
+static void mon_stage_append_u32(uint32_t value)
+{
+    char digits[10];
+    size_t count = 0u;
+
+    do {
+        digits[count++] = (char)('0' + (value % 10u));
+        value /= 10u;
+    } while (value != 0u);
+
+    while (count > 0u) {
+        count--;
+        mon_stage_append_char(digits[count]);
+    }
+}
+
+static void mon_stage_append_i32(int32_t value)
+{
+    uint32_t magnitude;
+
+    if (value < 0) {
+        mon_stage_append_char('-');
+        magnitude = (uint32_t)(-(value + 1)) + 1u;
+    } else {
+        magnitude = (uint32_t)value;
+    }
+    mon_stage_append_u32(magnitude);
+}
+
+static void mon_stage_append_u64(uint64_t value)
+{
+    char digits[20];
+    size_t count = 0u;
+
+    if (value <= UINT32_MAX) {
+        mon_stage_append_u32((uint32_t)value);
+        return;
     }
 
-    return g_mon_default_welcome;
+    do {
+        digits[count++] = (char)('0' + (value % 10u));
+        value /= 10u;
+    } while (value != 0u);
+
+    while (count > 0u) {
+        count--;
+        mon_stage_append_char(digits[count]);
+    }
 }
 
-static bool mon_default_trace_output_enabled(void)
+static void mon_stage_append_i64(int64_t value)
 {
-#ifdef NDEBUG
-    return false;
-#else
-    return true;
-#endif
+    uint64_t magnitude;
+
+    if (value < 0) {
+        mon_stage_append_char('-');
+        magnitude = (uint64_t)(-(value + 1)) + 1u;
+    } else {
+        magnitude = (uint64_t)value;
+    }
+    mon_stage_append_u64(magnitude);
 }
 
-static const char *mon_trace_output_state_text(bool enabled)
+static void mon_stage_commit(void)
 {
-    if (enabled) {
-        return g_mon_trace_output_on_text;
+    char *slot;
+
+    if (g_mon_state.staging_length == 0u) {
+        return;
     }
 
-    return g_mon_trace_output_off_text;
+    slot = g_mon_state.messages[g_mon_state.tail];
+    slot[g_mon_state.staging_length] = '\0';
+    g_mon_state.tail = mon_next_queue_index(g_mon_state.tail);
+    g_mon_state.count++;
+    g_mon_state.staging_length = 0u;
 }
 
-#if !MONITOR_ENABLE_FLOAT_SUPPORT
-static void mon_finish_output_delivery(void);
-static void mon_queue_message(const char *text);
-
-static void mon_queue_float_support_disabled(void)
+static void mon_stage_finish_line(void)
 {
-    mon_finish_output_delivery();
-    mon_queue_message(g_mon_float_support_disabled);
+    mon_stage_append_char('\n');
+    mon_stage_commit();
 }
-#endif
+
+static void mon_maybe_inject_drop_notice(void)
+{
+    uint32_t dropped;
+
+    if ((g_mon_state.dropped_messages == 0u) ||
+        (g_mon_state.count >= MON_MAX_QUEUED_MESSAGES)) {
+        return;
+    }
+
+    dropped = g_mon_state.dropped_messages;
+    g_mon_state.dropped_messages = 0u;
+
+    mon_stage_append_n("[monitor] dropped ", 18u);
+    mon_stage_append_u32(dropped);
+    mon_stage_append_n(" message(s)\n", 12u);
+    mon_stage_commit();
+}
+
+static void mon_queue_text(const char *text)
+{
+    mon_stage_append_text(text);
+    mon_stage_commit();
+}
+
+static void mon_queue_named_line(const char *prefix, const char *name)
+{
+    mon_stage_append_text(prefix);
+    mon_stage_append_text(name);
+    mon_stage_finish_line();
+}
 
 static mon_name_view_t mon_normalize_identifier(const char *source)
 {
@@ -239,21 +351,20 @@ static mon_name_view_t mon_normalize_identifier(const char *source)
         return view;
     }
 
-    while ((*start != '\0') && (isspace((unsigned char)*start) != 0)) {
+    while ((*start != '\0') && mon_is_whitespace(*start)) {
         start++;
     }
 
     if (*start == '&') {
         start++;
-        while ((*start != '\0') && (isspace((unsigned char)*start) != 0)) {
+        while ((*start != '\0') && mon_is_whitespace(*start)) {
             start++;
         }
     }
 
     length = strlen(start);
 
-    while ((length > 0u) &&
-           (isspace((unsigned char)start[length - 1u]) != 0)) {
+    while ((length > 0u) && mon_is_whitespace(start[length - 1u])) {
         length--;
     }
 
@@ -261,13 +372,12 @@ static mon_name_view_t mon_normalize_identifier(const char *source)
         start++;
         length -= 2u;
 
-        while ((length > 0u) && (isspace((unsigned char)*start) != 0)) {
+        while ((length > 0u) && mon_is_whitespace(*start)) {
             start++;
             length--;
         }
 
-        while ((length > 0u) &&
-               (isspace((unsigned char)start[length - 1u]) != 0)) {
+        while ((length > 0u) && mon_is_whitespace(start[length - 1u])) {
             length--;
         }
     }
@@ -284,74 +394,13 @@ static mon_name_view_t mon_normalize_identifier(const char *source)
 static bool mon_name_equals_view(const mon_trace_entry_t *entry,
                                  mon_name_view_t name)
 {
-    if ((entry == NULL) || (entry->name_length != name.length)) {
+    if (entry->name_length != name.length) {
         return false;
     }
-
     if (name.length == 0u) {
         return true;
     }
-
     return memcmp(entry->name_ptr, name.ptr, name.length) == 0;
-}
-
-static mon_trace_entry_t *mon_find_trace_by_pointer(const void *ptr)
-{
-    uint8_t index;
-
-    for (index = 0u; index < g_mon_state.trace_count; index++) {
-        mon_trace_entry_t *entry = &g_mon_state.traces[index];
-
-        if (((entry->flags & MON_TRACE_FLAG_WRITABLE) != 0u) &&
-            (entry->source_ptr == ptr)) {
-            return entry;
-        }
-    }
-
-    return NULL;
-}
-
-static mon_trace_entry_t *mon_find_trace_by_name(const char *name)
-{
-    mon_name_view_t view;
-    size_t length;
-    uint8_t index;
-
-    if (name == NULL) {
-        return NULL;
-    }
-
-    length = strlen(name);
-    view.ptr = name;
-    if ((length == 0u) || (length >= MON_MAX_NAME_LENGTH)) {
-        return NULL;
-    }
-    view.length = (uint8_t)length;
-
-    for (index = 0u; index < g_mon_state.trace_count; index++) {
-        if (mon_name_equals_view(&g_mon_state.traces[index], view)) {
-            return &g_mon_state.traces[index];
-        }
-    }
-
-    return NULL;
-}
-
-static bool mon_name_conflicts(const mon_trace_entry_t *skip, mon_name_view_t name)
-{
-    uint8_t index;
-
-    for (index = 0u; index < g_mon_state.trace_count; index++) {
-        const mon_trace_entry_t *entry = &g_mon_state.traces[index];
-
-        if ((entry == skip) || !mon_name_equals_view(entry, name)) {
-            continue;
-        }
-
-        return true;
-    }
-
-    return false;
 }
 
 static mon_trace_entry_t *mon_find_trace_by_view(mon_name_view_t name)
@@ -367,500 +416,177 @@ static mon_trace_entry_t *mon_find_trace_by_view(mon_name_view_t name)
             return &g_mon_state.traces[index];
         }
     }
-
     return NULL;
 }
 
-static uint8_t mon_next_queue_index(uint8_t index)
+static mon_trace_entry_t *mon_find_trace_by_name(const char *name)
 {
-    index++;
+    mon_name_view_t view;
+    size_t length;
 
-    if (index >= MON_MAX_QUEUED_MESSAGES) {
-        index = 0u;
+    if (name == NULL) {
+        return NULL;
     }
-
-    return index;
+    length = strlen(name);
+    if ((length == 0u) || (length >= MON_MAX_NAME_LENGTH)) {
+        return NULL;
+    }
+    view.ptr = name;
+    view.length = (uint8_t)length;
+    return mon_find_trace_by_view(view);
 }
 
-static bool mon_queue_message_direct_n(const char *text, size_t length)
+static mon_trace_entry_t *mon_find_trace_by_pointer(const void *ptr)
 {
-    char *slot;
+    uint8_t index;
 
-    if (g_mon_state.count >= MON_MAX_QUEUED_MESSAGES) {
-        return false;
-    }
-
-    if (length >= MON_MAX_MESSAGE_LENGTH) {
-        length = MON_MAX_MESSAGE_LENGTH - 1u;
-    }
-
-    slot = g_mon_state.messages[g_mon_state.tail];
-    (void)memcpy(slot, text, length);
-    slot[length] = '\0';
-
-    g_mon_state.tail = mon_next_queue_index(g_mon_state.tail);
-    g_mon_state.count++;
-
-    return true;
-}
-
-static void mon_append_n_to_buffer(char *buffer,
-                                   size_t buffer_size,
-                                   size_t *length,
-                                   const char *text,
-                                   size_t text_length)
-{
-    size_t available;
-
-    if ((buffer == NULL) || (length == NULL) || (text == NULL) ||
-        (buffer_size <= 1u) || (*length >= (buffer_size - 1u))) {
-        return;
-    }
-
-    available = (buffer_size - 1u) - *length;
-    if (text_length > available) {
-        text_length = available;
-    }
-
-    (void)memcpy(&buffer[*length], text, text_length);
-    *length += text_length;
-}
-
-static void mon_append_char_to_buffer(char *buffer,
-                                      size_t buffer_size,
-                                      size_t *length,
-                                      char value)
-{
-    if ((buffer == NULL) || (length == NULL) || (buffer_size <= 1u) ||
-        (*length >= (buffer_size - 1u))) {
-        return;
-    }
-
-    buffer[*length] = value;
-    (*length)++;
-}
-
-static void mon_append_u64_to_buffer(char *buffer,
-                                     size_t buffer_size,
-                                     size_t *length,
-                                     uint64_t value)
-{
-    char digits[20];
-    size_t count = 0u;
-    size_t available;
-
-    if ((buffer == NULL) || (length == NULL) || (buffer_size <= 1u) ||
-        (*length >= (buffer_size - 1u))) {
-        return;
-    }
-
-    do {
-        digits[count] = (char)('0' + (value % 10u));
-        value /= 10u;
-        count++;
-    } while ((value != 0u) && (count < sizeof(digits)));
-
-    available = (buffer_size - 1u) - *length;
-    while ((count > 0u) && (available > 0u)) {
-        count--;
-        buffer[*length] = digits[count];
-        (*length)++;
-        available--;
-    }
-}
-
-static void mon_flush_drop_notice_if_possible(void)
-{
-    char notice[MON_MAX_MESSAGE_LENGTH];
-    size_t length = 0u;
-    uint32_t dropped;
-
-    if ((g_mon_state.dropped_messages == 0u) ||
-        (g_mon_state.count >= MON_MAX_QUEUED_MESSAGES)) {
-        return;
-    }
-
-    dropped = g_mon_state.dropped_messages;
-    g_mon_state.dropped_messages = 0u;
-
-    if (length < sizeof(notice)) {
-        static const char prefix[] = "[monitor] dropped ";
-
-        mon_append_n_to_buffer(notice,
-                               sizeof(notice),
-                               &length,
-                               prefix,
-                               sizeof(prefix) - 1u);
-    }
-
-    mon_append_u64_to_buffer(notice, sizeof(notice), &length, dropped);
-
-    mon_append_char_to_buffer(notice, sizeof(notice), &length, ' ');
-
-    if (length < sizeof(notice)) {
-        static const char suffix[] = "message(s)\n";
-
-        mon_append_n_to_buffer(notice,
-                               sizeof(notice),
-                               &length,
-                               suffix,
-                               sizeof(suffix) - 1u);
-    }
-
-    if (!mon_queue_message_direct_n(notice, length)) {
-        g_mon_state.dropped_messages += dropped;
-    }
-}
-
-static void mon_queue_text_n(const char *text, size_t length)
-{
-    size_t remaining = length;
-    const char *cursor = text;
-
-    while (remaining > 0u) {
-        size_t chunk_length = remaining;
-
-        if (chunk_length >= MON_MAX_MESSAGE_LENGTH) {
-            chunk_length = MON_MAX_MESSAGE_LENGTH - 1u;
+    for (index = 0u; index < g_mon_state.trace_count; index++) {
+        mon_trace_entry_t *entry = &g_mon_state.traces[index];
+        if (((entry->flags & MON_TRACE_FLAG_WRITABLE) != 0u) &&
+            (entry->source_ptr == ptr)) {
+            return entry;
         }
-
-        mon_flush_drop_notice_if_possible();
-
-        if (!mon_queue_message_direct_n(cursor, chunk_length)) {
-            g_mon_state.dropped_messages++;
-        }
-
-        cursor += chunk_length;
-        remaining -= chunk_length;
     }
+    return NULL;
 }
 
-static void mon_queue_message(const char *text)
+static bool mon_name_conflicts(const mon_trace_entry_t *skip,
+                               mon_name_view_t name)
 {
-    if ((text == NULL) || (text[0] == '\0')) {
-        return;
-    }
+    uint8_t index;
 
-    mon_queue_text_n(text, strlen(text));
-}
-
-static void mon_queue_text(const char *text)
-{
-    if (text == NULL) {
-        return;
-    }
-
-    mon_queue_message(text);
-}
-
-static void mon_builder_init(mon_builder_t *builder)
-{
-    builder->length = 0u;
-}
-
-static void mon_builder_flush(mon_builder_t *builder)
-{
-    if (builder->length == 0u) {
-        return;
-    }
-
-    mon_flush_drop_notice_if_possible();
-
-    if (!mon_queue_message_direct_n(builder->data, builder->length)) {
-        g_mon_state.dropped_messages++;
-    }
-
-    builder->length = 0u;
-}
-
-static void mon_builder_append_n(mon_builder_t *builder,
-                                 const char *text,
-                                 size_t length)
-{
-    size_t remaining = length;
-    const char *cursor = text;
-
-    while (remaining > 0u) {
-        const size_t available =
-            (MON_MAX_MESSAGE_LENGTH - 1u) - builder->length;
-        size_t chunk_length = remaining;
-
-        if (available == 0u) {
-            mon_builder_flush(builder);
+    for (index = 0u; index < g_mon_state.trace_count; index++) {
+        const mon_trace_entry_t *entry = &g_mon_state.traces[index];
+        if (entry == skip) {
             continue;
         }
-
-        if (chunk_length > available) {
-            chunk_length = available;
+        if (mon_name_equals_view(entry, name)) {
+            return true;
         }
-
-        (void)memcpy(&builder->data[builder->length], cursor, chunk_length);
-        builder->length += chunk_length;
-        cursor += chunk_length;
-        remaining -= chunk_length;
     }
+    return false;
 }
 
-static void mon_builder_append_text(mon_builder_t *builder, const char *text)
+static void mon_queue_duplicate_name(mon_name_view_t name)
 {
-    if (text == NULL) {
-        return;
-    }
-
-    mon_builder_append_n(builder, text, strlen(text));
+    mon_stage_append_n("[monitor] duplicate trace name: ", 32u);
+    mon_stage_append_n(name.ptr, name.length);
+    mon_stage_finish_line();
 }
 
-static void mon_builder_append_char(mon_builder_t *builder, char value)
+static uint8_t mon_type_size(uint8_t type)
 {
-    mon_builder_append_n(builder, &value, 1u);
+    return g_mon_type_info[type].size;
 }
 
-static void mon_builder_append_name(mon_builder_t *builder,
-                                    const mon_trace_entry_t *entry)
+static uint8_t mon_type_flags(uint8_t type)
 {
-    mon_builder_append_n(builder, entry->name_ptr, entry->name_length);
+    return g_mon_type_info[type].flags;
 }
 
-static void mon_builder_append_u64(mon_builder_t *builder, uint64_t value)
+static void mon_read_source(const mon_trace_entry_t *entry, uint8_t out[8])
 {
-    char digits[20];
-    size_t count = 0u;
-
-    do {
-        digits[count] = (char)('0' + (value % 10u));
-        value /= 10u;
-        count++;
-    } while ((value != 0u) && (count < sizeof(digits)));
-
-    while (count > 0u) {
-        count--;
-        mon_builder_append_char(builder, digits[count]);
-    }
-}
-
-static void mon_builder_append_i64(mon_builder_t *builder, int64_t value)
-{
-    uint64_t magnitude;
-
-    if (value < 0) {
-        mon_builder_append_char(builder, '-');
-        magnitude = (uint64_t)(-(value + 1)) + 1u;
-    } else {
-        magnitude = (uint64_t)value;
-    }
-
-    mon_builder_append_u64(builder, magnitude);
-}
-
-static void mon_builder_finish_line(mon_builder_t *builder)
-{
-    mon_builder_append_char(builder, '\n');
-    mon_builder_flush(builder);
-}
-
-static mon_value_type_t mon_entry_type(const mon_trace_entry_t *entry)
-{
-    return (mon_value_type_t)entry->type;
-}
-
-static const char *mon_type_name(mon_value_type_t type)
-{
-    switch (type) {
-    case MON_VALUE_U8:
-        return "u8";
-    case MON_VALUE_I8:
-        return "i8";
-    case MON_VALUE_U16:
-        return "u16";
-    case MON_VALUE_I16:
-        return "i16";
-    case MON_VALUE_U32:
-        return "u32";
-    case MON_VALUE_I32:
-        return "i32";
-    case MON_VALUE_U64:
-        return "u64";
-    case MON_VALUE_I64:
-        return "i64";
-#if MONITOR_ENABLE_FLOAT_SUPPORT
-    case MON_VALUE_F32:
-        return "f32";
-    case MON_VALUE_F64:
-        return "f64";
-#endif
-    default:
-        return "?";
-    }
-}
-
-static void mon_read_value(const mon_trace_entry_t *entry,
-                           mon_value_snapshot_t *snapshot)
-{
-    snapshot->u64 = 0u;
+    (void)memset(out, 0, 8u);
 
     if ((entry->flags & MON_TRACE_FLAG_WRITABLE) == 0u) {
-        *snapshot = entry->last_value;
+        (void)memcpy(out, entry->last_value, 8u);
         return;
     }
 
-    switch (mon_entry_type(entry)) {
-    case MON_VALUE_U8:
-        snapshot->u8 = *(const uint8_t *)entry->source_ptr;
-        break;
-    case MON_VALUE_I8:
-        snapshot->i8 = *(const int8_t *)entry->source_ptr;
-        break;
-    case MON_VALUE_U16:
-        snapshot->u16 = *(const uint16_t *)entry->source_ptr;
-        break;
-    case MON_VALUE_I16:
-        snapshot->i16 = *(const int16_t *)entry->source_ptr;
-        break;
-    case MON_VALUE_U32:
-        snapshot->u32 = *(const uint32_t *)entry->source_ptr;
-        break;
-    case MON_VALUE_I32:
-        snapshot->i32 = *(const int32_t *)entry->source_ptr;
-        break;
-    case MON_VALUE_U64:
-        snapshot->u64 = *(const uint64_t *)entry->source_ptr;
-        break;
-    case MON_VALUE_I64:
-        snapshot->i64 = *(const int64_t *)entry->source_ptr;
-        break;
-#if MONITOR_ENABLE_FLOAT_SUPPORT
-    case MON_VALUE_F32:
-        snapshot->f32 = *(const float *)entry->source_ptr;
-        break;
-    case MON_VALUE_F64:
-        snapshot->f64 = *(const double *)entry->source_ptr;
-        break;
-#endif
+    if (entry->source_ptr != NULL) {
+        (void)memcpy(out, entry->source_ptr, mon_type_size(entry->type));
+    }
+}
+
+static uint64_t mon_bytes_as_u64(const uint8_t bytes[8], uint8_t size)
+{
+    uint64_t value = 0u;
+    (void)memcpy(&value, bytes, size);
+    return value;
+}
+
+static int64_t mon_bytes_as_i64(const uint8_t bytes[8], uint8_t size)
+{
+    uint64_t u = mon_bytes_as_u64(bytes, size);
+
+    switch (size) {
+    case 1u:
+        return (int64_t)(int8_t)u;
+    case 2u:
+        return (int64_t)(int16_t)u;
+    case 4u:
+        return (int64_t)(int32_t)u;
     default:
-        break;
+        return (int64_t)u;
     }
 }
 
-static bool mon_snapshot_equal(const mon_value_snapshot_t *lhs,
-                               const mon_value_snapshot_t *rhs)
+static void mon_stage_append_value(uint8_t type, const uint8_t bytes[8])
 {
-    return memcmp(lhs, rhs, sizeof(*lhs)) == 0;
-}
+    const uint8_t size = mon_type_size(type);
+    const uint8_t flags = mon_type_flags(type);
 
-static void mon_builder_append_snapshot(mon_builder_t *builder,
-                                        mon_value_type_t type,
-                                        const mon_value_snapshot_t *value)
-{
-    switch (type) {
-    case MON_VALUE_U8:
-        mon_builder_append_u64(builder, value->u8);
-        return;
-    case MON_VALUE_I8:
-        mon_builder_append_i64(builder, value->i8);
-        return;
-    case MON_VALUE_U16:
-        mon_builder_append_u64(builder, value->u16);
-        return;
-    case MON_VALUE_I16:
-        mon_builder_append_i64(builder, value->i16);
-        return;
-    case MON_VALUE_U32:
-        mon_builder_append_u64(builder, value->u32);
-        return;
-    case MON_VALUE_I32:
-        mon_builder_append_i64(builder, value->i32);
-        return;
-    case MON_VALUE_U64:
-        mon_builder_append_u64(builder, value->u64);
-        return;
-    case MON_VALUE_I64:
-        mon_builder_append_i64(builder, value->i64);
-        return;
 #if MONITOR_ENABLE_FLOAT_SUPPORT
-    case MON_VALUE_F32: {
+    if ((flags & MON_TYPE_FLAG_FLOAT) != 0u) {
         char buffer[32];
-        const int written =
-            snprintf(buffer, sizeof(buffer), "%.9g", (double)value->f32);
+        int written;
 
-        if (written < 0) {
-            mon_builder_append_char(builder, '?');
-            return;
+        if (size == 4u) {
+            float f;
+            (void)memcpy(&f, bytes, 4u);
+            written = snprintf(buffer, sizeof(buffer), "%.9g", (double)f);
+        } else {
+            double d;
+            (void)memcpy(&d, bytes, 8u);
+            written = snprintf(buffer, sizeof(buffer), "%.17g", d);
         }
 
-        mon_builder_append_n(builder,
-                             buffer,
-                             mon_bounded_strlen(buffer, sizeof(buffer) - 1u));
-        return;
-    }
-    case MON_VALUE_F64: {
-        char buffer[32];
-        const int written =
-            snprintf(buffer, sizeof(buffer), "%.17g", value->f64);
-
         if (written < 0) {
-            mon_builder_append_char(builder, '?');
+            mon_stage_append_char('?');
             return;
         }
-
-        mon_builder_append_n(builder,
-                             buffer,
-                             mon_bounded_strlen(buffer, sizeof(buffer) - 1u));
+        if ((size_t)written >= sizeof(buffer)) {
+            written = (int)sizeof(buffer) - 1;
+        }
+        mon_stage_append_n(buffer, (size_t)written);
         return;
     }
 #endif
-    default:
-        mon_builder_append_char(builder, '?');
-        return;
+
+    if ((flags & MON_TYPE_FLAG_SIGNED) != 0u) {
+        if (size <= 4u) {
+            mon_stage_append_i32((int32_t)mon_bytes_as_i64(bytes, size));
+        } else {
+            mon_stage_append_i64(mon_bytes_as_i64(bytes, size));
+        }
+    } else {
+        if (size <= 4u) {
+            mon_stage_append_u32((uint32_t)mon_bytes_as_u64(bytes, size));
+        } else {
+            mon_stage_append_u64(mon_bytes_as_u64(bytes, size));
+        }
     }
+#if !MONITOR_ENABLE_FLOAT_SUPPORT
+    (void)flags;
+#endif
 }
 
-static const char *mon_dequeue_message(void)
+static void mon_queue_entry_value(const mon_trace_entry_t *entry,
+                                  const char *prefix)
 {
-    mon_flush_drop_notice_if_possible();
+    uint8_t bytes[8];
 
-    if (g_mon_state.count == 0u) {
-        return NULL;
+    mon_read_source(entry, bytes);
+
+    if (prefix != NULL) {
+        mon_stage_append_text(prefix);
     }
-
-    mon_state_set_flag(MON_STATE_FLAG_OUTPUT_ACTIVE, true);
-    return g_mon_state.messages[g_mon_state.head];
-}
-
-static void mon_finish_output_delivery(void)
-{
-    if (!mon_state_flag_is_set(MON_STATE_FLAG_OUTPUT_ACTIVE)) {
-        return;
-    }
-
-    g_mon_state.head = mon_next_queue_index(g_mon_state.head);
-    g_mon_state.count--;
-    mon_state_set_flag(MON_STATE_FLAG_OUTPUT_ACTIVE, false);
-}
-
-static char *mon_next_token(char **cursor)
-{
-    char *start = *cursor;
-
-    while ((*start != '\0') && (isspace((unsigned char)*start) != 0)) {
-        start++;
-    }
-
-    if (*start == '\0') {
-        *cursor = start;
-        return NULL;
-    }
-
-    *cursor = start;
-    while ((**cursor != '\0') && (isspace((unsigned char)**cursor) == 0)) {
-        (*cursor)++;
-    }
-
-    if (**cursor != '\0') {
-        **cursor = '\0';
-        (*cursor)++;
-    }
-
-    return start;
+    mon_stage_append_n(entry->name_ptr, entry->name_length);
+    mon_stage_append_n(" (", 2u);
+    mon_stage_append_text(g_mon_type_info[entry->type].name);
+    mon_stage_append_n(") = ", 4u);
+    mon_stage_append_value(entry->type, bytes);
+    mon_stage_finish_line();
 }
 
 static int mon_digit_value(char ch)
@@ -868,27 +594,24 @@ static int mon_digit_value(char ch)
     if ((ch >= '0') && (ch <= '9')) {
         return ch - '0';
     }
-
     if ((ch >= 'a') && (ch <= 'f')) {
         return 10 + (ch - 'a');
     }
-
     if ((ch >= 'A') && (ch <= 'F')) {
         return 10 + (ch - 'A');
     }
-
     return -1;
 }
 
-static bool mon_parse_unsigned_digits(const char *text,
-                                      uint64_t maximum,
-                                      uint64_t *value)
+static bool mon_parse_u32_digits(const char *text,
+                                 uint32_t maximum,
+                                 uint32_t *value)
 {
     const char *cursor = text;
-    uint64_t parsed = 0u;
-    uint64_t base = 10u;
+    uint32_t parsed = 0u;
+    uint32_t base = 10u;
 
-    if ((cursor == NULL) || (value == NULL) || (*cursor == '\0')) {
+    if (*cursor == '\0') {
         return false;
     }
 
@@ -905,15 +628,51 @@ static bool mon_parse_unsigned_digits(const char *text,
 
     while (*cursor != '\0') {
         const int digit = mon_digit_value(*cursor);
+        if ((digit < 0) || ((uint32_t)digit >= base)) {
+            return false;
+        }
+        if (parsed > ((maximum - (uint32_t)digit) / base)) {
+            return false;
+        }
+        parsed = (parsed * base) + (uint32_t)digit;
+        cursor++;
+    }
 
+    *value = parsed;
+    return true;
+}
+
+static bool mon_parse_u64_digits(const char *text,
+                                 uint64_t maximum,
+                                 uint64_t *value)
+{
+    const char *cursor = text;
+    uint64_t parsed = 0u;
+    uint64_t base = 10u;
+
+    if (*cursor == '\0') {
+        return false;
+    }
+
+    if ((cursor[0] == '0') && ((cursor[1] == 'x') || (cursor[1] == 'X'))) {
+        base = 16u;
+        cursor += 2;
+    } else if ((cursor[0] == '0') && (cursor[1] != '\0')) {
+        base = 8u;
+    }
+
+    if (*cursor == '\0') {
+        return false;
+    }
+
+    while (*cursor != '\0') {
+        const int digit = mon_digit_value(*cursor);
         if ((digit < 0) || ((uint64_t)digit >= base)) {
             return false;
         }
-
         if (parsed > ((maximum - (uint64_t)digit) / base)) {
             return false;
         }
-
         parsed = (parsed * base) + (uint64_t)digit;
         cursor++;
     }
@@ -922,81 +681,80 @@ static bool mon_parse_unsigned_digits(const char *text,
     return true;
 }
 
-static bool mon_parse_unsigned(const char *text,
-                               uint64_t maximum,
-                               uint64_t *value)
+static bool mon_parse_integer(const char *text,
+                              uint8_t size,
+                              bool is_signed,
+                              int64_t *out_signed,
+                              uint64_t *out_unsigned)
 {
     const char *cursor = text;
-
-    if ((cursor == NULL) || (value == NULL)) {
-        return false;
-    }
-
-    if (*cursor == '+') {
-        cursor++;
-    } else if (*cursor == '-') {
-        return false;
-    }
-
-    return mon_parse_unsigned_digits(cursor, maximum, value);
-}
-
-static bool mon_parse_signed(const char *text,
-                             int64_t minimum,
-                             int64_t maximum,
-                             int64_t *value)
-{
-    const char *cursor = text;
-    uint64_t magnitude;
     bool negative = false;
 
-    if ((cursor == NULL) || (value == NULL)) {
+    if (cursor == NULL) {
         return false;
     }
 
     if (*cursor == '+') {
         cursor++;
     } else if (*cursor == '-') {
+        if (!is_signed) {
+            return false;
+        }
         negative = true;
         cursor++;
     }
 
-    if (!negative) {
-        if (!mon_parse_unsigned_digits(cursor, (uint64_t)maximum, &magnitude)) {
-            return false;
+    if (is_signed) {
+        uint64_t magnitude_limit;
+        uint64_t magnitude;
+
+        if (negative) {
+            magnitude_limit = (uint64_t)1u << ((size * 8u) - 1u);
+        } else {
+            magnitude_limit = ((uint64_t)1u << ((size * 8u) - 1u)) - 1u;
         }
 
-        *value = (int64_t)magnitude;
+        if (size <= 4u) {
+            uint32_t m32;
+            if (!mon_parse_u32_digits(cursor,
+                                      (uint32_t)magnitude_limit,
+                                      &m32)) {
+                return false;
+            }
+            magnitude = m32;
+        } else {
+            if (!mon_parse_u64_digits(cursor, magnitude_limit, &magnitude)) {
+                return false;
+            }
+        }
+
+        if (negative) {
+            if (magnitude == magnitude_limit) {
+                *out_signed = (int64_t)(-(int64_t)(magnitude - 1u)) - 1;
+            } else {
+                *out_signed = -(int64_t)magnitude;
+            }
+        } else {
+            *out_signed = (int64_t)magnitude;
+        }
         return true;
     }
 
-    if (!mon_parse_unsigned_digits(cursor,
-                                   (uint64_t)(-(minimum + 1)) + 1u,
-                                   &magnitude)) {
-        return false;
-    }
-
-    if (magnitude == ((uint64_t)(-(minimum + 1)) + 1u)) {
-        *value = minimum;
+    if (size <= 4u) {
+        uint64_t limit = (size == 4u) ? UINT32_MAX
+                                      : (((uint64_t)1u << (size * 8u)) - 1u);
+        uint32_t v32;
+        if (!mon_parse_u32_digits(cursor, (uint32_t)limit, &v32)) {
+            return false;
+        }
+        *out_unsigned = v32;
         return true;
     }
 
-    *value = -(int64_t)magnitude;
-    return true;
+    return mon_parse_u64_digits(cursor, UINT64_MAX, out_unsigned);
 }
 
 #if MONITOR_ENABLE_FLOAT_SUPPORT
-static size_t mon_bounded_strlen(const char *text, size_t max_len)
-{
-    size_t length = 0u;
-
-    while ((length < max_len) && (text[length] != '\0')) {
-        length++;
-    }
-
-    return length;
-}
-
 static bool mon_parse_float64(const char *text, double *value)
 {
     char *end = NULL;
@@ -1009,7 +767,8 @@ static bool mon_parse_float64(const char *text, double *value)
     errno = 0;
     parsed_value = strtod(text, &end);
 
-    if ((text == end) || (end == NULL) || (*end != '\0') || (errno == ERANGE)) {
+    if ((text == end) || (end == NULL) || (*end != '\0') ||
+        (errno == ERANGE)) {
         return false;
     }
 
@@ -1021,128 +780,63 @@ static bool mon_parse_float64(const char *text, double *value)
 static mon_write_result_t mon_write_value(mon_trace_entry_t *entry,
                                           const char *text)
 {
-    uint64_t unsigned_value;
-    int64_t signed_value;
-#if MONITOR_ENABLE_FLOAT_SUPPORT
-    double float_value;
-#endif
-    mon_value_type_t type;
+    uint8_t type;
+    uint8_t size;
+    uint8_t flags;
 
     if ((entry == NULL) || (text == NULL)) {
         return MON_WRITE_RESULT_INVALID;
     }
-
     if ((entry->flags & MON_TRACE_FLAG_WRITABLE) == 0u) {
         return MON_WRITE_RESULT_READ_ONLY;
     }
 
-    type = mon_entry_type(entry);
+    type = entry->type;
+    size = mon_type_size(type);
+    flags = mon_type_flags(type);
 
-    switch (type) {
-    case MON_VALUE_U8:
-        if (!mon_parse_unsigned(text, UINT8_MAX, &unsigned_value)) {
-            return MON_WRITE_RESULT_INVALID;
-        }
-        *(uint8_t *)entry->source_ptr = (uint8_t)unsigned_value;
-        break;
-    case MON_VALUE_I8:
-        if (!mon_parse_signed(text, INT8_MIN, INT8_MAX, &signed_value)) {
-            return MON_WRITE_RESULT_INVALID;
-        }
-        *(int8_t *)entry->source_ptr = (int8_t)signed_value;
-        break;
-    case MON_VALUE_U16:
-        if (!mon_parse_unsigned(text, UINT16_MAX, &unsigned_value)) {
-            return MON_WRITE_RESULT_INVALID;
-        }
-        *(uint16_t *)entry->source_ptr = (uint16_t)unsigned_value;
-        break;
-    case MON_VALUE_I16:
-        if (!mon_parse_signed(text, INT16_MIN, INT16_MAX, &signed_value)) {
-            return MON_WRITE_RESULT_INVALID;
-        }
-        *(int16_t *)entry->source_ptr = (int16_t)signed_value;
-        break;
-    case MON_VALUE_U32:
-        if (!mon_parse_unsigned(text, UINT32_MAX, &unsigned_value)) {
-            return MON_WRITE_RESULT_INVALID;
-        }
-        *(uint32_t *)entry->source_ptr = (uint32_t)unsigned_value;
-        break;
-    case MON_VALUE_I32:
-        if (!mon_parse_signed(text, INT32_MIN, INT32_MAX, &signed_value)) {
-            return MON_WRITE_RESULT_INVALID;
-        }
-        *(int32_t *)entry->source_ptr = (int32_t)signed_value;
-        break;
-    case MON_VALUE_U64:
-        if (!mon_parse_unsigned(text, UINT64_MAX, &unsigned_value)) {
-            return MON_WRITE_RESULT_INVALID;
-        }
-        *(uint64_t *)entry->source_ptr = (uint64_t)unsigned_value;
-        break;
-    case MON_VALUE_I64:
-        if (!mon_parse_signed(text, INT64_MIN, INT64_MAX, &signed_value)) {
-            return MON_WRITE_RESULT_INVALID;
-        }
-        *(int64_t *)entry->source_ptr = (int64_t)signed_value;
-        break;
 #if MONITOR_ENABLE_FLOAT_SUPPORT
-    case MON_VALUE_F32:
-        if (!mon_parse_float64(text, &float_value)) {
+    if ((flags & MON_TYPE_FLAG_FLOAT) != 0u) {
+        double parsed;
+        if (!mon_parse_float64(text, &parsed)) {
             return MON_WRITE_RESULT_INVALID;
         }
-        if (isfinite(float_value) &&
-            ((float_value > FLT_MAX) || (float_value < -FLT_MAX))) {
-            return MON_WRITE_RESULT_INVALID;
+        if (size == 4u) {
+            float f;
+            if (isfinite(parsed) &&
+                ((parsed > (double)FLT_MAX) ||
+                 (parsed < -(double)FLT_MAX))) {
+                return MON_WRITE_RESULT_INVALID;
+            }
+            f = (float)parsed;
+            (void)memcpy(entry->source_ptr, &f, 4u);
+        } else {
+            (void)memcpy(entry->source_ptr, &parsed, 8u);
         }
-        *(float *)entry->source_ptr = (float)float_value;
-        break;
-    case MON_VALUE_F64:
-        if (!mon_parse_float64(text, &float_value)) {
-            return MON_WRITE_RESULT_INVALID;
-        }
-        *(double *)entry->source_ptr = float_value;
-        break;
+    } else
 #endif
-    default:
-        return MON_WRITE_RESULT_INVALID;
+    {
+        int64_t signed_value = 0;
+        uint64_t unsigned_value = 0u;
+
+        if (!mon_parse_integer(text,
+                               size,
+                               (flags & MON_TYPE_FLAG_SIGNED) != 0u,
+                               &signed_value,
+                               &unsigned_value)) {
+            return MON_WRITE_RESULT_INVALID;
+        }
+
+        if ((flags & MON_TYPE_FLAG_SIGNED) != 0u) {
+            (void)memcpy(entry->source_ptr, &signed_value, size);
+        } else {
+            (void)memcpy(entry->source_ptr, &unsigned_value, size);
+        }
     }
 
-    mon_read_value(entry, &entry->last_value);
+    (void)memset(entry->last_value, 0, 8u);
+    (void)memcpy(entry->last_value, entry->source_ptr, size);
     return MON_WRITE_RESULT_OK;
-}
-
-static void mon_queue_named_line(const char *prefix,
-                                 const char *name,
-                                 const char *suffix)
-{
-    mon_builder_t builder;
-
-    mon_builder_init(&builder);
-    mon_builder_append_text(&builder, prefix);
-    mon_builder_append_text(&builder, name);
-    mon_builder_append_text(&builder, suffix);
-    mon_builder_finish_line(&builder);
-}
-
-static void mon_queue_entry_value(const mon_trace_entry_t *entry,
-                                  const char *prefix)
-{
-    mon_builder_t builder;
-    mon_value_snapshot_t current_value;
-    const mon_value_type_t type = mon_entry_type(entry);
-
-    mon_read_value(entry, &current_value);
-
-    mon_builder_init(&builder);
-    mon_builder_append_text(&builder, prefix);
-    mon_builder_append_name(&builder, entry);
-    mon_builder_append_text(&builder, " (");
-    mon_builder_append_text(&builder, mon_type_name(type));
-    mon_builder_append_text(&builder, ") = ");
-    mon_builder_append_snapshot(&builder, type, &current_value);
-    mon_builder_finish_line(&builder);
 }
 
 static void mon_sync_writable_traces(void)
@@ -1151,12 +845,13 @@ static void mon_sync_writable_traces(void)
 
     for (index = 0u; index < g_mon_state.trace_count; index++) {
         mon_trace_entry_t *entry = &g_mon_state.traces[index];
-
         if ((entry->flags & MON_TRACE_FLAG_WRITABLE) == 0u) {
             continue;
         }
-
-        mon_read_value(entry, &entry->last_value);
+        (void)memset(entry->last_value, 0, 8u);
+        (void)memcpy(entry->last_value,
+                     entry->source_ptr,
+                     mon_type_size(entry->type));
     }
 }
 
@@ -1166,16 +861,19 @@ static void mon_check_writable_traces(void)
 
     for (index = 0u; index < g_mon_state.trace_count; index++) {
         mon_trace_entry_t *entry = &g_mon_state.traces[index];
-        mon_value_snapshot_t current_value;
+        uint8_t current[8];
 
         if ((entry->flags & MON_TRACE_FLAG_WRITABLE) == 0u) {
             continue;
         }
 
-        mon_read_value(entry, &current_value);
+        (void)memset(current, 0, 8u);
+        (void)memcpy(current,
+                     entry->source_ptr,
+                     mon_type_size(entry->type));
 
-        if (!mon_snapshot_equal(&entry->last_value, &current_value)) {
-            entry->last_value = current_value;
+        if (memcmp(entry->last_value, current, 8u) != 0) {
+            (void)memcpy(entry->last_value, current, 8u);
             mon_queue_entry_value(entry, "trace ");
         }
     }
@@ -1183,8 +881,8 @@ static void mon_check_writable_traces(void)
 
 static void mon_handle_help_command(void)
 {
-    mon_queue_text(mon_current_welcome_message());
-    mon_queue_message(g_mon_help_text);
+    mon_queue_text(g_mon_state.welcome_message);
+    mon_queue_text(g_mon_help_text);
 }
 
 static void mon_handle_list_command(void)
@@ -1192,12 +890,12 @@ static void mon_handle_list_command(void)
     uint8_t index;
 
     if (g_mon_state.trace_count == 0u) {
-        mon_queue_message(g_mon_no_traces_text);
+        mon_queue_text("No traces registered.\n");
         return;
     }
 
     for (index = 0u; index < g_mon_state.trace_count; index++) {
-        mon_queue_entry_value(&g_mon_state.traces[index], "");
+        mon_queue_entry_value(&g_mon_state.traces[index], NULL);
     }
 }
 
@@ -1206,48 +904,47 @@ static void mon_handle_get_command(const char *name)
     mon_trace_entry_t *entry = mon_find_trace_by_name(name);
 
     if (entry == NULL) {
-        mon_queue_named_line(g_mon_unknown_variable_prefix, name, "");
+        mon_queue_named_line("Unknown variable: ", name);
         return;
     }
-
-    mon_queue_entry_value(entry, "");
+    mon_queue_entry_value(entry, NULL);
 }
 
 static void mon_handle_set_command(const char *name, const char *value)
 {
     mon_trace_entry_t *entry = mon_find_trace_by_name(name);
-    const mon_write_result_t result = mon_write_value(entry, value);
+    mon_write_result_t result;
 
     if (entry == NULL) {
-        mon_queue_named_line(g_mon_unknown_variable_prefix, name, "");
+        mon_queue_named_line("Unknown variable: ", name);
         return;
     }
 
+    result = mon_write_value(entry, value);
+
     if (result == MON_WRITE_RESULT_READ_ONLY) {
-        mon_queue_named_line(g_mon_read_only_prefix, name, "");
+        mon_queue_named_line("Variable is read-only: ", name);
         return;
     }
 
     if (result != MON_WRITE_RESULT_OK) {
-        mon_builder_t builder;
-
-        mon_builder_init(&builder);
-        mon_builder_append_text(&builder, g_mon_invalid_value_prefix);
-        mon_builder_append_text(&builder, name);
-        mon_builder_append_text(&builder, g_mon_invalid_value_separator);
-        mon_builder_append_text(&builder, value);
-        mon_builder_finish_line(&builder);
+        mon_stage_append_n("Invalid value for ", 18u);
+        mon_stage_append_text(name);
+        mon_stage_append_n(": ", 2u);
+        mon_stage_append_text(value);
+        mon_stage_finish_line();
         return;
     }
 
-    mon_queue_entry_value(entry, "");
+    mon_queue_entry_value(entry, NULL);
 }
 
 static void mon_handle_trace_command(const char *argument)
 {
     if (argument == NULL) {
-        mon_queue_message(mon_trace_output_state_text(
-            mon_state_flag_is_set(MON_STATE_FLAG_TRACE_OUTPUT)));
+        mon_queue_text(mon_state_flag_is_set(MON_STATE_FLAG_TRACE_OUTPUT)
+                           ? g_mon_trace_output_on_text
+                           : g_mon_trace_output_off_text);
         return;
     }
 
@@ -1256,19 +953,42 @@ static void mon_handle_trace_command(const char *argument)
             mon_sync_writable_traces();
             mon_state_set_flag(MON_STATE_FLAG_TRACE_OUTPUT, true);
         }
-
-        mon_queue_message(mon_trace_output_state_text(
-            mon_state_flag_is_set(MON_STATE_FLAG_TRACE_OUTPUT)));
+        mon_queue_text(g_mon_trace_output_on_text);
         return;
     }
 
     if (strcmp(argument, "off") == 0) {
         mon_state_set_flag(MON_STATE_FLAG_TRACE_OUTPUT, false);
-        mon_queue_message(mon_trace_output_state_text(false));
+        mon_queue_text(g_mon_trace_output_off_text);
         return;
     }
 
-    mon_queue_message(g_mon_usage_trace_text);
+    mon_queue_text("Usage: trace [on|off]\n");
+}
+
+static char *mon_next_token(char **cursor)
+{
+    char *start = *cursor;
+
+    while ((*start != '\0') && mon_is_whitespace(*start)) {
+        start++;
+    }
+
+    if (*start == '\0') {
+        *cursor = start;
+        return NULL;
+    }
+
+    *cursor = start;
+    while ((**cursor != '\0') && !mon_is_whitespace(**cursor)) {
+        (*cursor)++;
+    }
+
+    if (**cursor != '\0') {
+        **cursor = '\0';
+        (*cursor)++;
+    }
+    return start;
 }
 
 static void mon_process_line(char *line)
@@ -1284,20 +1004,18 @@ static void mon_process_line(char *line)
 
     if ((strcmp(command, "help") == 0) || (strcmp(command, "?") == 0)) {
         if (mon_next_token(&cursor) != NULL) {
-            mon_queue_message(g_mon_usage_help_text);
+            mon_queue_text("Usage: help\n");
             return;
         }
-
         mon_handle_help_command();
         return;
     }
 
     if (strcmp(command, "list") == 0) {
         if (mon_next_token(&cursor) != NULL) {
-            mon_queue_message(g_mon_usage_list_text);
+            mon_queue_text("Usage: list\n");
             return;
         }
-
         mon_handle_list_command();
         return;
     }
@@ -1305,10 +1023,9 @@ static void mon_process_line(char *line)
     if (strcmp(command, "get") == 0) {
         argument1 = mon_next_token(&cursor);
         if ((argument1 == NULL) || (mon_next_token(&cursor) != NULL)) {
-            mon_queue_message(g_mon_usage_get_text);
+            mon_queue_text("Usage: get <name>\n");
             return;
         }
-
         mon_handle_get_command(argument1);
         return;
     }
@@ -1316,49 +1033,43 @@ static void mon_process_line(char *line)
     if (strcmp(command, "set") == 0) {
         argument1 = mon_next_token(&cursor);
         argument2 = mon_next_token(&cursor);
-
         if ((argument1 == NULL) || (argument2 == NULL) ||
             (mon_next_token(&cursor) != NULL)) {
-            mon_queue_message(g_mon_usage_set_text);
+            mon_queue_text("Usage: set <name> <value>\n");
             return;
         }
-
         mon_handle_set_command(argument1, argument2);
         return;
     }
 
     if (strcmp(command, "trace") == 0) {
         argument1 = mon_next_token(&cursor);
-
         if (mon_next_token(&cursor) != NULL) {
-            mon_queue_message(g_mon_usage_trace_text);
+            mon_queue_text("Usage: trace [on|off]\n");
             return;
         }
-
         mon_handle_trace_command(argument1);
         return;
     }
 
-    mon_queue_named_line(g_mon_unknown_command_prefix, command, "");
+    mon_queue_named_line("Unknown command: ", command);
     mon_handle_help_command();
 }
 
 static void mon_process_input(const char *input)
 {
-    const unsigned char *cursor =
-        (const unsigned char *)(const void *)input;
+    const unsigned char *cursor = (const unsigned char *)(const void *)input;
 
     while (*cursor != '\0') {
         const unsigned char ch = *cursor;
 
         if ((ch == '\r') || (ch == '\n')) {
             if (mon_state_flag_is_set(MON_STATE_FLAG_INPUT_OVERFLOW)) {
-                mon_queue_message(g_mon_input_too_long_text);
+                mon_queue_text("[monitor] input line too long\n");
             } else if (g_mon_state.input_length > 0u) {
                 g_mon_state.input_buffer[g_mon_state.input_length] = '\0';
                 mon_process_line(g_mon_state.input_buffer);
             }
-
             g_mon_state.input_length = 0u;
             mon_state_set_flag(MON_STATE_FLAG_INPUT_OVERFLOW, false);
             cursor++;
@@ -1370,7 +1081,6 @@ static void mon_process_input(const char *input)
                 (g_mon_state.input_length > 0u)) {
                 g_mon_state.input_length--;
             }
-
             cursor++;
             continue;
         }
@@ -1398,65 +1108,85 @@ static void mon_process_input(const char *input)
     }
 }
 
+static const char *mon_dequeue_message(void)
+{
+    mon_maybe_inject_drop_notice();
+
+    if (g_mon_state.count == 0u) {
+        return NULL;
+    }
+    mon_state_set_flag(MON_STATE_FLAG_OUTPUT_ACTIVE, true);
+    return g_mon_state.messages[g_mon_state.head];
+}
+
+static void mon_finish_output_delivery(void)
+{
+    if (!mon_state_flag_is_set(MON_STATE_FLAG_OUTPUT_ACTIVE)) {
+        return;
+    }
+    g_mon_state.head = mon_next_queue_index(g_mon_state.head);
+    g_mon_state.count--;
+    mon_state_set_flag(MON_STATE_FLAG_OUTPUT_ACTIVE, false);
+}
+
+#if !MONITOR_ENABLE_FLOAT_SUPPORT
+static void mon_queue_float_support_disabled(void)
+{
+    mon_finish_output_delivery();
+    mon_queue_text(g_mon_float_support_disabled);
+}
+#endif
+
 static void mon_register_pointer_trace(void *ptr,
-                                       mon_value_type_t type,
+                                       uint8_t type,
                                        const char *human_identifier)
 {
     mon_name_view_t name;
     mon_trace_entry_t *entry;
-    mon_value_type_t previous_type;
+    uint8_t previous_type;
 
     mon_finish_output_delivery();
 
     if (ptr == NULL) {
-        mon_queue_message(g_mon_null_pointer_text);
+        mon_queue_text("[monitor] null trace pointer ignored\n");
         return;
     }
 
     name = mon_normalize_identifier(human_identifier);
     if (name.length == 0u) {
-        mon_queue_message(g_mon_empty_name_text);
+        mon_queue_text("[monitor] empty trace name ignored\n");
         return;
     }
 
     entry = mon_find_trace_by_pointer(ptr);
     if (entry != NULL) {
-        previous_type = mon_entry_type(entry);
+        previous_type = entry->type;
 
         if (mon_name_conflicts(entry, name)) {
-            mon_builder_t builder;
-
-            mon_builder_init(&builder);
-            mon_builder_append_text(&builder, g_mon_duplicate_name_prefix);
-            mon_builder_append_n(&builder, name.ptr, name.length);
-            mon_builder_finish_line(&builder);
+            mon_queue_duplicate_name(name);
             return;
         }
 
         entry->source_ptr = ptr;
         entry->name_ptr = name.ptr;
         entry->name_length = name.length;
-        entry->type = (uint8_t)type;
+        entry->type = type;
         entry->flags = MON_TRACE_FLAG_WRITABLE;
 
         if (previous_type != type) {
-            mon_read_value(entry, &entry->last_value);
+            (void)memset(entry->last_value, 0, 8u);
+            (void)memcpy(entry->last_value, ptr, mon_type_size(type));
         }
         return;
     }
 
     if (g_mon_state.trace_count >= MON_MAX_TRACES) {
-        mon_queue_message(g_mon_trace_registry_full_text);
+        mon_queue_text("[monitor] trace registry full\n");
         return;
     }
 
     if (mon_name_conflicts(NULL, name)) {
-        mon_builder_t builder;
-
-        mon_builder_init(&builder);
-        mon_builder_append_text(&builder, g_mon_duplicate_name_prefix);
-        mon_builder_append_n(&builder, name.ptr, name.length);
-        mon_builder_finish_line(&builder);
+        mon_queue_duplicate_name(name);
         return;
     }
 
@@ -1464,70 +1194,61 @@ static void mon_register_pointer_trace(void *ptr,
     entry->source_ptr = ptr;
     entry->name_ptr = name.ptr;
     entry->name_length = name.length;
-    entry->type = (uint8_t)type;
+    entry->type = type;
     entry->flags = MON_TRACE_FLAG_WRITABLE;
-    mon_read_value(entry, &entry->last_value);
+    (void)memset(entry->last_value, 0, 8u);
+    (void)memcpy(entry->last_value, ptr, mon_type_size(type));
     g_mon_state.trace_count++;
-    g_mon_state.writable_trace_count++;
+    mon_state_set_flag(MON_STATE_FLAG_HAS_WRITABLES, true);
 }
 
-static void mon_register_value_trace(const mon_value_snapshot_t *value,
-                                     mon_value_type_t type,
+static void mon_register_value_trace(const uint8_t value[8],
+                                     uint8_t type,
                                      const char *human_identifier)
 {
     mon_name_view_t name;
     mon_trace_entry_t *entry;
-    mon_value_type_t previous_type;
+    uint8_t previous_type;
 
     mon_finish_output_delivery();
 
     name = mon_normalize_identifier(human_identifier);
     if (name.length == 0u) {
-        mon_queue_message(g_mon_empty_name_text);
+        mon_queue_text("[monitor] empty trace name ignored\n");
         return;
     }
 
     entry = mon_find_trace_by_view(name);
     if (entry != NULL) {
-        previous_type = mon_entry_type(entry);
+        previous_type = entry->type;
 
         if ((entry->flags & MON_TRACE_FLAG_WRITABLE) != 0u) {
-            mon_builder_t builder;
-
-            mon_builder_init(&builder);
-            mon_builder_append_text(&builder, g_mon_duplicate_name_prefix);
-            mon_builder_append_n(&builder, name.ptr, name.length);
-            mon_builder_finish_line(&builder);
+            mon_queue_duplicate_name(name);
             return;
         }
 
         entry->name_ptr = name.ptr;
         entry->name_length = name.length;
-        entry->type = (uint8_t)type;
+        entry->type = type;
 
-        if ((previous_type != type) || !mon_snapshot_equal(&entry->last_value, value)) {
-            entry->last_value = *value;
+        if ((previous_type != type) ||
+            (memcmp(entry->last_value, value, 8u) != 0)) {
+            (void)memcpy(entry->last_value, value, 8u);
             if ((previous_type == type) &&
                 mon_state_flag_is_set(MON_STATE_FLAG_TRACE_OUTPUT)) {
                 mon_queue_entry_value(entry, "trace ");
             }
         }
-
         return;
     }
 
     if (g_mon_state.trace_count >= MON_MAX_TRACES) {
-        mon_queue_message(g_mon_trace_registry_full_text);
+        mon_queue_text("[monitor] trace registry full\n");
         return;
     }
 
     if (mon_name_conflicts(NULL, name)) {
-        mon_builder_t builder;
-
-        mon_builder_init(&builder);
-        mon_builder_append_text(&builder, g_mon_duplicate_name_prefix);
-        mon_builder_append_n(&builder, name.ptr, name.length);
-        mon_builder_finish_line(&builder);
+        mon_queue_duplicate_name(name);
         return;
     }
 
@@ -1535,20 +1256,21 @@ static void mon_register_value_trace(const mon_value_snapshot_t *value,
     entry->source_ptr = NULL;
     entry->name_ptr = name.ptr;
     entry->name_length = name.length;
-    entry->type = (uint8_t)type;
+    entry->type = type;
     entry->flags = 0u;
-    entry->last_value = *value;
+    (void)memcpy(entry->last_value, value, 8u);
     g_mon_state.trace_count++;
 }
 
 void mon_reset(const char *welcome_message)
 {
-    mon_state_clear();
-    mon_state_set_flag(MON_STATE_FLAG_TRACE_OUTPUT,
-                       mon_default_trace_output_enabled());
+    (void)memset(&g_mon_state, 0, sizeof(g_mon_state));
+#ifndef NDEBUG
+    mon_state_set_flag(MON_STATE_FLAG_TRACE_OUTPUT, true);
+#endif
     g_mon_state.welcome_message =
         (welcome_message != NULL) ? welcome_message : g_mon_default_welcome;
-    mon_queue_text(mon_current_welcome_message());
+    mon_queue_text(g_mon_state.welcome_message);
 }
 
 const char *mon_task(const char *input, int device_ready)
@@ -1556,7 +1278,7 @@ const char *mon_task(const char *input, int device_ready)
     mon_finish_output_delivery();
 
     if (mon_state_flag_is_set(MON_STATE_FLAG_TRACE_OUTPUT) &&
-        (g_mon_state.writable_trace_count > 0u)) {
+        mon_state_flag_is_set(MON_STATE_FLAG_HAS_WRITABLES)) {
         mon_check_writable_traces();
     }
 
@@ -1573,9 +1295,9 @@ const char *mon_task(const char *input, int device_ready)
 
 const char *mon_print(const char *fmt, ...)
 {
-    char buffer[MON_MAX_FORMAT_LENGTH];
-    int written;
     va_list args;
+    int written;
+    char *slot;
 
     mon_finish_output_delivery();
 
@@ -1583,39 +1305,56 @@ const char *mon_print(const char *fmt, ...)
         return NULL;
     }
 
-    va_start(args, fmt);
-    written = vsnprintf(buffer, sizeof(buffer), fmt, args);
-    va_end(args);
+    if (g_mon_state.staging_length > 0u) {
+        mon_stage_commit();
+    }
+    mon_maybe_inject_drop_notice();
 
-    if (written < 0) {
-        mon_queue_message(g_mon_format_failure_text);
+    if (g_mon_state.count >= MON_MAX_QUEUED_MESSAGES) {
+        g_mon_state.dropped_messages++;
         return NULL;
     }
 
-    mon_queue_text(buffer);
+    slot = g_mon_state.messages[g_mon_state.tail];
+    va_start(args, fmt);
+    written = vsnprintf(slot, MON_MAX_MESSAGE_LENGTH, fmt, args);
+    va_end(args);
 
-    if ((size_t)written >= sizeof(buffer)) {
-        mon_queue_message(g_mon_format_truncated_text);
+    if (written < 0) {
+        slot[0] = '\0';
+        mon_queue_text("[monitor] formatting failure\n");
+        return NULL;
     }
 
+    if ((size_t)written >= MON_MAX_MESSAGE_LENGTH) {
+        slot[MON_MAX_MESSAGE_LENGTH - 1u] = '\0';
+    }
+    g_mon_state.tail = mon_next_queue_index(g_mon_state.tail);
+    g_mon_state.count++;
+
+    if ((size_t)written >= MON_MAX_FORMAT_LENGTH) {
+        mon_queue_text("[monitor] formatted output truncated\n");
+    }
     return NULL;
 }
 
 #define MON_DEFINE_TRACE_FUNCTION(function_name, value_type, enum_type)       \
     void function_name(value_type *value, const char *human_identifier)       \
     {                                                                         \
-        mon_register_pointer_trace((void *)value, enum_type,                  \
+        mon_register_pointer_trace((void *)value,                             \
+                                   (uint8_t)(enum_type),                      \
                                    human_identifier);                         \
     }
 
-#define MON_DEFINE_VALUE_TRACE_FUNCTION(function_name, member_name,            \
-                                        value_type, enum_type)                \
+#define MON_DEFINE_VALUE_TRACE_FUNCTION(function_name, value_type, enum_type) \
     void function_name(value_type value, const char *human_identifier)        \
     {                                                                         \
-        mon_value_snapshot_t snapshot;                                        \
-        snapshot.u64 = 0u;                                                    \
-        snapshot.member_name = value;                                         \
-        mon_register_value_trace(&snapshot, enum_type, human_identifier);     \
+        uint8_t bytes[8];                                                     \
+        (void)memset(bytes, 0, 8u);                                           \
+        (void)memcpy(bytes, &value, sizeof(value));                           \
+        mon_register_value_trace(bytes,                                       \
+                                 (uint8_t)(enum_type),                        \
+                                 human_identifier);                           \
     }
 
 MON_DEFINE_TRACE_FUNCTION(mon_trace_u8, uint8_t, MON_VALUE_U8)
@@ -1645,17 +1384,17 @@ void mon_trace_f64(double *value, const char *human_identifier)
 }
 #endif
 
-MON_DEFINE_VALUE_TRACE_FUNCTION(mon_trace_u8_value, u8, uint8_t, MON_VALUE_U8)
-MON_DEFINE_VALUE_TRACE_FUNCTION(mon_trace_i8_value, i8, int8_t, MON_VALUE_I8)
-MON_DEFINE_VALUE_TRACE_FUNCTION(mon_trace_u16_value, u16, uint16_t, MON_VALUE_U16)
-MON_DEFINE_VALUE_TRACE_FUNCTION(mon_trace_i16_value, i16, int16_t, MON_VALUE_I16)
-MON_DEFINE_VALUE_TRACE_FUNCTION(mon_trace_u32_value, u32, uint32_t, MON_VALUE_U32)
-MON_DEFINE_VALUE_TRACE_FUNCTION(mon_trace_i32_value, i32, int32_t, MON_VALUE_I32)
-MON_DEFINE_VALUE_TRACE_FUNCTION(mon_trace_u64_value, u64, uint64_t, MON_VALUE_U64)
-MON_DEFINE_VALUE_TRACE_FUNCTION(mon_trace_i64_value, i64, int64_t, MON_VALUE_I64)
+MON_DEFINE_VALUE_TRACE_FUNCTION(mon_trace_u8_value, uint8_t, MON_VALUE_U8)
+MON_DEFINE_VALUE_TRACE_FUNCTION(mon_trace_i8_value, int8_t, MON_VALUE_I8)
+MON_DEFINE_VALUE_TRACE_FUNCTION(mon_trace_u16_value, uint16_t, MON_VALUE_U16)
+MON_DEFINE_VALUE_TRACE_FUNCTION(mon_trace_i16_value, int16_t, MON_VALUE_I16)
+MON_DEFINE_VALUE_TRACE_FUNCTION(mon_trace_u32_value, uint32_t, MON_VALUE_U32)
+MON_DEFINE_VALUE_TRACE_FUNCTION(mon_trace_i32_value, int32_t, MON_VALUE_I32)
+MON_DEFINE_VALUE_TRACE_FUNCTION(mon_trace_u64_value, uint64_t, MON_VALUE_U64)
+MON_DEFINE_VALUE_TRACE_FUNCTION(mon_trace_i64_value, int64_t, MON_VALUE_I64)
 #if MONITOR_ENABLE_FLOAT_SUPPORT
-MON_DEFINE_VALUE_TRACE_FUNCTION(mon_trace_f32_value, f32, float, MON_VALUE_F32)
-MON_DEFINE_VALUE_TRACE_FUNCTION(mon_trace_f64_value, f64, double, MON_VALUE_F64)
+MON_DEFINE_VALUE_TRACE_FUNCTION(mon_trace_f32_value, float, MON_VALUE_F32)
+MON_DEFINE_VALUE_TRACE_FUNCTION(mon_trace_f64_value, double, MON_VALUE_F64)
 #else
 void mon_trace_f32_value(float value, const char *human_identifier)
 {
