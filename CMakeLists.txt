@@ -2,26 +2,20 @@ cmake_minimum_required(VERSION 3.20)
 
 project(minimon LANGUAGES C)
 
-option(MONITOR_BUILD_EXAMPLE "Build interactive monitor example" ON)
+option(MONITOR_BUILD_EXAMPLE "Build interactive monitor example" OFF)
 option(MONITOR_BUILD_TESTS "Build monitor tests" OFF)
 option(MONITOR_ENABLE_FLOAT_SUPPORT "Enable float trace and shell support" OFF)
-option(MONITOR_ENABLE_SIZE_OPTIMIZATIONS
-       "Enable section-based dead-stripping for release builds"
-       ON)
+option(MONITOR_ENABLE_SHELL_FEATURES "Enable interactive shell features (echo, history, tab completion)" ON)
+option(MONITOR_ENABLE_SIZE_OPTIMIZATIONS "Enable section-based dead-stripping for release builds" ON)
 
-add_library(minimon STATIC
-    src/monitor.c
-)
+add_library(minimon STATIC src/monitor.c)
 
-target_include_directories(minimon
-    PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-)
+target_include_directories(minimon PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 target_compile_features(minimon PUBLIC c_std_11)
-target_compile_definitions(minimon
-    PUBLIC
+target_compile_definitions(minimon PUBLIC
         MONITOR_ENABLE_FLOAT_SUPPORT=$<BOOL:${MONITOR_ENABLE_FLOAT_SUPPORT}>
+        MONITOR_ENABLE_SHELL_FEATURES=$<BOOL:${MONITOR_ENABLE_SHELL_FEATURES}>
 )
 
 if(MONITOR_ENABLE_SIZE_OPTIMIZATIONS)
@@ -122,8 +116,12 @@ if(MONITOR_BUILD_TESTS)
         add_test(NAME ${test_name} COMMAND ${test_name})
     endfunction()
 
-    monitor_add_test(monitor_smoke_test)
-    monitor_add_test(monitor_shell_test)
-    monitor_add_test(monitor_buffer_test)
-    monitor_add_test(monitor_registry_test)
+    if(MONITOR_ENABLE_SHELL_FEATURES)
+        monitor_add_test(monitor_shell_features_test)
+    else()
+        monitor_add_test(monitor_smoke_test)
+        monitor_add_test(monitor_shell_test)
+        monitor_add_test(monitor_buffer_test)
+        monitor_add_test(monitor_registry_test)
+    endif()
 endif()

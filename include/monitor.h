@@ -39,6 +39,16 @@ extern "C" {
 #define MONITOR_ENABLE_FLOAT_SUPPORT 0
 #endif
 
+#ifndef MONITOR_ENABLE_SHELL_FEATURES
+#define MONITOR_ENABLE_SHELL_FEATURES 0
+#endif
+
+#if MONITOR_ENABLE_SHELL_FEATURES
+#ifndef MON_HISTORY_DEPTH
+#define MON_HISTORY_DEPTH 4u
+#endif
+#endif
+
 /*
  * Reset all internal monitor state and configure a welcome message.
  *

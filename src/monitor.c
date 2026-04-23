@@ -34,6 +34,12 @@ _Static_assert(MON_MAX_QUEUED_MESSAGES <= UINT8_MAX,
                "MON_MAX_QUEUED_MESSAGES must fit in uint8_t");
 _Static_assert(MON_MAX_FORMAT_LENGTH > 1u,
                "MON_MAX_FORMAT_LENGTH must be greater than one");
+#if MONITOR_ENABLE_SHELL_FEATURES
+_Static_assert(MON_HISTORY_DEPTH > 0u,
+               "MON_HISTORY_DEPTH must be greater than zero");
+_Static_assert(MON_HISTORY_DEPTH <= UINT8_MAX,
+               "MON_HISTORY_DEPTH must fit in uint8_t");
+#endif
 
 static const char g_mon_default_welcome[] =
     "minimon ready. Type 'help' for commands.\n";
@@ -139,6 +145,13 @@ typedef struct mon_state {
     uint8_t trace_count;
     uint8_t flags;
     mon_trace_entry_t traces[MON_MAX_TRACES];
+#if MONITOR_ENABLE_SHELL_FEATURES
+    char history[MON_HISTORY_DEPTH][MON_MAX_INPUT_LENGTH];
+    uint8_t history_count;
+    uint8_t history_head;
+    uint8_t history_cursor;
+    uint8_t esc_state;
+#endif
 } mon_state_t;
 
 static mon_state_t g_mon_state;
@@ -1056,6 +1069,154 @@ static void mon_process_line(char *line)
     mon_handle_help_command();
 }
 
+#if MONITOR_ENABLE_SHELL_FEATURES
+static void mon_echo_n(const char *text, size_t length)
+{
+    if (mon_state_flag_is_set(MON_STATE_FLAG_INPUT_OVERFLOW)) {
+        return;
+    }
+    mon_stage_append_n(text, length);
+}
+
+static void mon_echo_char(char c)
+{
+    mon_echo_n(&c, 1u);
+}
+
+static void mon_echo_erase_current_line(void)
+{
+    uint8_t remaining = g_mon_state.input_length;
+
+    while (remaining > 0u) {
+        mon_echo_n("\b \b", 3u);
+        remaining--;
+    }
+}
+
+static void mon_history_push(void)
+{
+    uint8_t length = g_mon_state.input_length;
+
+    if (length == 0u) {
+        return;
+    }
+
+    (void)memcpy(g_mon_state.history[g_mon_state.history_head],
+                 g_mon_state.input_buffer,
+                 length);
+    g_mon_state.history[g_mon_state.history_head][length] = '\0';
+
+    g_mon_state.history_head++;
+    if (g_mon_state.history_head >= MON_HISTORY_DEPTH) {
+        g_mon_state.history_head = 0u;
+    }
+    if (g_mon_state.history_count < MON_HISTORY_DEPTH) {
+        g_mon_state.history_count++;
+    }
+    g_mon_state.history_cursor = 0u;
+}
+
+static void mon_history_recall(bool direction_up)
+{
+    uint8_t slot;
+    uint8_t length;
+
+    if (direction_up) {
+        if (g_mon_state.history_cursor >= g_mon_state.history_count) {
+            return;
+        }
+    } else {
+        if (g_mon_state.history_cursor == 0u) {
+            return;
+        }
+    }
+
+    mon_echo_erase_current_line();
+    mon_state_set_flag(MON_STATE_FLAG_INPUT_OVERFLOW, false);
+
+    if (direction_up) {
+        g_mon_state.history_cursor++;
+    } else {
+        g_mon_state.history_cursor--;
+    }
+
+    if (g_mon_state.history_cursor == 0u) {
+        g_mon_state.input_length = 0u;
+        return;
+    }
+
+    slot = (uint8_t)((g_mon_state.history_head + MON_HISTORY_DEPTH -
+                      g_mon_state.history_cursor) %
+                     MON_HISTORY_DEPTH);
+    length = (uint8_t)strlen(g_mon_state.history[slot]);
+
+    (void)memcpy(g_mon_state.input_buffer,
+                 g_mon_state.history[slot],
+                 length);
+    g_mon_state.input_length = length;
+    mon_echo_n(g_mon_state.history[slot], length);
+}
+
+static void mon_tab_complete(void)
+{
+    uint8_t prefix_start;
+    uint8_t prefix_length;
+    uint8_t index;
+    uint8_t match_count = 0u;
+    const mon_trace_entry_t *match = NULL;
+    uint8_t append_length;
+    uint8_t appended = 0u;
+
+    if (mon_state_flag_is_set(MON_STATE_FLAG_INPUT_OVERFLOW)) {
+        return;
+    }
+
+    prefix_start = g_mon_state.input_length;
+    while ((prefix_start > 0u) &&
+           !mon_is_whitespace(g_mon_state.input_buffer[prefix_start - 1u])) {
+        prefix_start--;
+    }
+    prefix_length = (uint8_t)(g_mon_state.input_length - prefix_start);
+    if (prefix_length == 0u) {
+        return;
+    }
+
+    for (index = 0u; index < g_mon_state.trace_count; index++) {
+        const mon_trace_entry_t *entry = &g_mon_state.traces[index];
+        if (entry->name_length <= prefix_length) {
+            continue;
+        }
+        if (memcmp(entry->name_ptr,
+                   &g_mon_state.input_buffer[prefix_start],
+                   prefix_length) != 0) {
+            continue;
+        }
+        match_count++;
+        if (match_count > 1u) {
+            return;
+        }
+        match = entry;
+    }
+
+    if (match_count != 1u) {
+        return;
+    }
+
+    append_length = (uint8_t)(match->name_length - prefix_length);
+    while (appended < append_length) {
+        char c = match->name_ptr[prefix_length + appended];
+        if ((g_mon_state.input_length + 1u) >= MON_MAX_INPUT_LENGTH) {
+            mon_state_set_flag(MON_STATE_FLAG_INPUT_OVERFLOW, true);
+            return;
+        }
+        g_mon_state.input_buffer[g_mon_state.input_length] = c;
+        g_mon_state.input_length++;
+        mon_echo_char(c);
+        appended++;
+    }
+}
+#endif
+
 static void mon_process_input(const char *input)
 {
     const unsigned char *cursor = (const unsigned char *)(const void *)input;
@@ -1063,13 +1224,47 @@ static void mon_process_input(const char *input)
     while (*cursor != '\0') {
         const unsigned char ch = *cursor;
 
+#if MONITOR_ENABLE_SHELL_FEATURES
+        if (g_mon_state.esc_state == 1u) {
+            g_mon_state.esc_state = (ch == '[') ? 2u : 0u;
+            cursor++;
+            continue;
+        }
+        if (g_mon_state.esc_state == 2u) {
+            g_mon_state.esc_state = 0u;
+            if (ch == 'A') {
+                mon_history_recall(true);
+            } else if (ch == 'B') {
+                mon_history_recall(false);
+            }
+            cursor++;
+            continue;
+        }
+        if (ch == 0x1BU) {
+            g_mon_state.esc_state = 1u;
+            cursor++;
+            continue;
+        }
+#endif
+
         if ((ch == '\r') || (ch == '\n')) {
             if (mon_state_flag_is_set(MON_STATE_FLAG_INPUT_OVERFLOW)) {
                 mon_queue_text("[monitor] input line too long\n");
             } else if (g_mon_state.input_length > 0u) {
                 g_mon_state.input_buffer[g_mon_state.input_length] = '\0';
+#if MONITOR_ENABLE_SHELL_FEATURES
+                mon_echo_n("\r\n", 2u);
+                mon_stage_commit();
+                mon_history_push();
+#endif
                 mon_process_line(g_mon_state.input_buffer);
             }
+#if MONITOR_ENABLE_SHELL_FEATURES
+            else if (!mon_state_flag_is_set(MON_STATE_FLAG_INPUT_OVERFLOW)) {
+                mon_echo_n("\r\n", 2u);
+            }
+            g_mon_state.history_cursor = 0u;
+#endif
             g_mon_state.input_length = 0u;
             mon_state_set_flag(MON_STATE_FLAG_INPUT_OVERFLOW, false);
             cursor++;
@@ -1080,10 +1275,21 @@ static void mon_process_input(const char *input)
             if (!mon_state_flag_is_set(MON_STATE_FLAG_INPUT_OVERFLOW) &&
                 (g_mon_state.input_length > 0u)) {
                 g_mon_state.input_length--;
+#if MONITOR_ENABLE_SHELL_FEATURES
+                mon_echo_n("\b \b", 3u);
+#endif
             }
             cursor++;
             continue;
         }
+
+#if MONITOR_ENABLE_SHELL_FEATURES
+        if (ch == '\t') {
+            mon_tab_complete();
+            cursor++;
+            continue;
+        }
+#endif
 
         if (mon_state_flag_is_set(MON_STATE_FLAG_INPUT_OVERFLOW)) {
             cursor++;
@@ -1104,8 +1310,17 @@ static void mon_process_input(const char *input)
         g_mon_state.input_buffer[g_mon_state.input_length] =
             (char)((ch == '\t') ? ' ' : ch);
         g_mon_state.input_length++;
+#if MONITOR_ENABLE_SHELL_FEATURES
+        mon_echo_char((char)ch);
+#endif
         cursor++;
     }
+
+#if MONITOR_ENABLE_SHELL_FEATURES
+    if (g_mon_state.staging_length > 0u) {
+        mon_stage_commit();
+    }
+#endif
 }
 
 static const char *mon_dequeue_message(void)
