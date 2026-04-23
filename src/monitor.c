@@ -1078,11 +1078,6 @@ static void mon_echo_n(const char *text, size_t length)
     mon_stage_append_n(text, length);
 }
 
-static void mon_echo_char(char c)
-{
-    mon_echo_n(&c, 1u);
-}
-
 static void mon_echo_erase_current_line(void)
 {
     uint8_t remaining = g_mon_state.input_length;
@@ -1095,21 +1090,23 @@ static void mon_echo_erase_current_line(void)
 
 static void mon_history_push(void)
 {
-    uint8_t length = g_mon_state.input_length;
+    const uint8_t length = g_mon_state.input_length;
+    const uint8_t slot = g_mon_state.history_head;
+    uint8_t next = (uint8_t)(slot + 1u);
 
     if (length == 0u) {
         return;
     }
 
-    (void)memcpy(g_mon_state.history[g_mon_state.history_head],
+    (void)memcpy(g_mon_state.history[slot],
                  g_mon_state.input_buffer,
                  length);
-    g_mon_state.history[g_mon_state.history_head][length] = '\0';
+    g_mon_state.history[slot][length] = '\0';
 
-    g_mon_state.history_head++;
-    if (g_mon_state.history_head >= MON_HISTORY_DEPTH) {
-        g_mon_state.history_head = 0u;
+    if (next >= MON_HISTORY_DEPTH) {
+        next = 0u;
     }
+    g_mon_state.history_head = next;
     if (g_mon_state.history_count < MON_HISTORY_DEPTH) {
         g_mon_state.history_count++;
     }
@@ -1118,35 +1115,35 @@ static void mon_history_push(void)
 
 static void mon_history_recall(bool direction_up)
 {
+    uint8_t cursor = g_mon_state.history_cursor;
     uint8_t slot;
     uint8_t length;
 
     if (direction_up) {
-        if (g_mon_state.history_cursor >= g_mon_state.history_count) {
+        if (cursor >= g_mon_state.history_count) {
             return;
         }
+        cursor++;
     } else {
-        if (g_mon_state.history_cursor == 0u) {
+        if (cursor == 0u) {
             return;
         }
+        cursor--;
     }
 
-    mon_echo_erase_current_line();
+    /* Clear overflow BEFORE erasing so the backspaces aren't suppressed: a
+     * user who filled the input line and then pressed UP still needs the
+     * on-screen columns wiped before the recalled text is drawn. */
     mon_state_set_flag(MON_STATE_FLAG_INPUT_OVERFLOW, false);
+    mon_echo_erase_current_line();
+    g_mon_state.history_cursor = cursor;
 
-    if (direction_up) {
-        g_mon_state.history_cursor++;
-    } else {
-        g_mon_state.history_cursor--;
-    }
-
-    if (g_mon_state.history_cursor == 0u) {
+    if (cursor == 0u) {
         g_mon_state.input_length = 0u;
         return;
     }
 
-    slot = (uint8_t)((g_mon_state.history_head + MON_HISTORY_DEPTH -
-                      g_mon_state.history_cursor) %
+    slot = (uint8_t)((g_mon_state.history_head + MON_HISTORY_DEPTH - cursor) %
                      MON_HISTORY_DEPTH);
     length = (uint8_t)strlen(g_mon_state.history[slot]);
 
@@ -1165,7 +1162,8 @@ static void mon_tab_complete(void)
     uint8_t match_count = 0u;
     const mon_trace_entry_t *match = NULL;
     uint8_t append_length;
-    uint8_t appended = 0u;
+    uint8_t capacity;
+    bool truncated;
 
     if (mon_state_flag_is_set(MON_STATE_FLAG_INPUT_OVERFLOW)) {
         return;
@@ -1203,16 +1201,21 @@ static void mon_tab_complete(void)
     }
 
     append_length = (uint8_t)(match->name_length - prefix_length);
-    while (appended < append_length) {
-        char c = match->name_ptr[prefix_length + appended];
-        if ((g_mon_state.input_length + 1u) >= MON_MAX_INPUT_LENGTH) {
-            mon_state_set_flag(MON_STATE_FLAG_INPUT_OVERFLOW, true);
-            return;
-        }
-        g_mon_state.input_buffer[g_mon_state.input_length] = c;
-        g_mon_state.input_length++;
-        mon_echo_char(c);
-        appended++;
+    capacity = (uint8_t)((MON_MAX_INPUT_LENGTH - 1u) - g_mon_state.input_length);
+    truncated = (append_length > capacity);
+    if (truncated) {
+        append_length = capacity;
+    }
+
+    (void)memcpy(&g_mon_state.input_buffer[g_mon_state.input_length],
+                 &match->name_ptr[prefix_length],
+                 append_length);
+    mon_echo_n(&match->name_ptr[prefix_length], append_length);
+    g_mon_state.input_length =
+        (uint8_t)(g_mon_state.input_length + append_length);
+
+    if (truncated) {
+        mon_state_set_flag(MON_STATE_FLAG_INPUT_OVERFLOW, true);
     }
 }
 #endif
@@ -1260,7 +1263,7 @@ static void mon_process_input(const char *input)
                 mon_process_line(g_mon_state.input_buffer);
             }
 #if MONITOR_ENABLE_SHELL_FEATURES
-            else if (!mon_state_flag_is_set(MON_STATE_FLAG_INPUT_OVERFLOW)) {
+            else {
                 mon_echo_n("\r\n", 2u);
             }
             g_mon_state.history_cursor = 0u;
@@ -1311,15 +1314,16 @@ static void mon_process_input(const char *input)
             (char)((ch == '\t') ? ' ' : ch);
         g_mon_state.input_length++;
 #if MONITOR_ENABLE_SHELL_FEATURES
-        mon_echo_char((char)ch);
+        {
+            const char echoed = (char)ch;
+            mon_echo_n(&echoed, 1u);
+        }
 #endif
         cursor++;
     }
 
 #if MONITOR_ENABLE_SHELL_FEATURES
-    if (g_mon_state.staging_length > 0u) {
-        mon_stage_commit();
-    }
+    mon_stage_commit();
 #endif
 }
 
